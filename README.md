@@ -33,6 +33,13 @@
 - **package revoke**: 撤销变更包签收（release-manager 角色）
 - **package export**: 导出变更包为 JSON 文件
 - **package import**: 从 JSON 文件导入变更包
+- **archive create**: 创建发布证据归档（已成功发布的版本生成可审计证据包）
+- **archive show**: 查看归档详情
+- **archive list**: 列出所有归档（支持按环境、状态筛选）
+- **archive verify**: 校验归档完整性和配置哈希
+- **archive revoke**: 撤销归档（release-manager 角色）
+- **archive export**: 导出归档为 JSON 文件
+- **archive import**: 从 JSON 文件导入归档
 
 ## 核心约束
 
@@ -53,13 +60,20 @@
 - **developer 只能创建非 prod 环境的变更包和查看所有包**
 - **apply 和 batch apply 发布到 prod 时，对应版本必须在已签收的变更包中**
 - **发布到 prod 失败时，不会推进 current_version 或写入 success release 记录**
+- **归档名称不能重复，只能归档已成功发布的版本**
+- **developer 只能归档 dev/staging 环境，release-manager 才能归档 prod 和执行撤销**
+- **prod 环境归档必须关联审批记录**
+- **归档导入时摘要哈希不一致会失败，同名导入需要 --force 覆盖**
+- **所有归档操作都会写入 audit_logs 和 error_logs**
+- **撤销后的归档 verify 会失败，归档数据保留用于审计**
+- **归档创建失败不会污染发布记录**
 
 ## 角色与权限
 
 | 角色 | 权限 |
 |------|------|
-| `developer` | 基本操作（import, validate, plan, apply to dev/staging, pending, history, export）+ 管理 dev/staging 发布窗口 + 查看所有窗口 + 创建非 prod 变更包 + 查看所有变更包 + 校验变更包完整性 |
-| `release-manager` | 所有 developer 权限 + approve, reject, lock, unlock, apply to prod + 管理所有环境发布窗口 + --override-window + 签收/撤销签收 prod 变更包 + 创建 prod 变更包 |
+| `developer` | 基本操作（import, validate, plan, apply to dev/staging, pending, history, export）+ 管理 dev/staging 发布窗口 + 查看所有窗口 + 创建非 prod 变更包 + 查看所有变更包 + 校验变更包完整性 + 归档 dev/staging 环境 + 查看所有归档 + 校验归档完整性 + 导出/导入归档 |
+| `release-manager` | 所有 developer 权限 + approve, reject, lock, unlock, apply to prod + 管理所有环境发布窗口 + --override-window + 签收/撤销签收 prod 变更包 + 创建 prod 变更包 + 归档 prod 环境 + 撤销归档 + 使用 --force 覆盖导入同名归档 |
 
 ### 设置角色方式
 
@@ -274,7 +288,79 @@ python pipeline.py package export prod-release-001 --output prod-release-001.jso
 python pipeline.py package import prod-release-001.json --role release-manager
 ```
 
-### 13. 使用变更包的完整 Prod 发布流程
+### 13. 发布证据归档管理
+```bash
+# developer 归档非 prod 环境
+python pipeline.py archive create staging-release-001 1.0.0 staging
+
+# release-manager 归档 prod 环境
+python pipeline.py archive create prod-release-001 1.0.0 prod --role release-manager
+
+# 归档时关联变更包
+python pipeline.py archive create linked-archive 1.0.0 staging --linked-package test-pkg
+
+# 查看归档详情
+python pipeline.py archive show staging-release-001
+
+# 列出所有归档
+python pipeline.py archive list
+
+# 按环境筛选
+python pipeline.py archive list --env prod
+
+# 按状态筛选（active/revoked）
+python pipeline.py archive list --status active
+
+# 组合筛选
+python pipeline.py archive list --env staging --status active
+
+# 校验归档完整性
+python pipeline.py archive verify staging-release-001
+
+# release-manager 撤销归档
+python pipeline.py archive revoke staging-release-001 --role release-manager --reason "归档内容有误，需要重新创建"
+
+# 导出归档为 JSON
+python pipeline.py archive export staging-release-001 --output staging-release-001.json
+
+# 从 JSON 导入归档（需要对应版本已发布成功）
+python pipeline.py archive import staging-release-001.json
+
+# 同名导入使用 --force 覆盖（需要 release-manager 角色）
+python pipeline.py archive import staging-release-001.json --force --role release-manager
+```
+
+### 14. 使用归档的完整发布审计流程
+```bash
+# 1. 导入配置并发布
+python pipeline.py import config_pipeline/examples/config_v1.json
+python pipeline.py apply 1.0.0 staging --yes
+
+# 2. 标记待审批并审批
+python pipeline.py pending 1.0.0 prod
+python pipeline.py approve 1.0.0 prod --role release-manager
+
+# 3. 创建变更包并签收
+python pipeline.py package create prod-pkg prod 1.0.0 --role release-manager
+python pipeline.py package sign prod-pkg --role release-manager
+
+# 4. 发布到 prod
+python pipeline.py apply 1.0.0 prod --role release-manager --yes
+
+# 5. 创建发布证据归档（release-manager）
+python pipeline.py archive create prod-audit-001 1.0.0 prod --role release-manager --linked-package prod-pkg
+
+# 6. 验证归档完整性
+python pipeline.py archive verify prod-audit-001
+
+# 7. 导出归档用于审计
+python pipeline.py archive export prod-audit-001 --output audit-evidence.json
+
+# 8. 查看归档详情（包含环境、版本、发布结果、配置摘要、关联审批、关联变更包、创建人、时间、状态）
+python pipeline.py archive show prod-audit-001
+```
+
+### 15. 使用变更包的完整 Prod 发布流程
 ```bash
 # 1. 导入配置
 python pipeline.py import config_pipeline/examples/config_v1.json
@@ -311,7 +397,7 @@ python pipeline.py apply 2.0.0 prod --role release-manager --yes
 python pipeline.py batch apply prod:1.0.0 prod:2.0.0 --role release-manager --yes
 ```
 
-### 14. 导出审计数据
+### 16. 导出审计数据
 ```bash
 # 导出为 JSON
 python pipeline.py export --output audit.json --format json
@@ -633,6 +719,82 @@ python pipeline.py apply 1.0.0 prod --role release-manager --yes
 ```bash
 python pipeline.py batch apply prod:1.0.0 --role release-manager --yes
 # 错误: Version '1.0.0' must be in a signed package before release to prod.
+```
+
+### 35. 创建重复名称的归档
+```bash
+# 创建第一个归档
+python pipeline.py archive create test-archive 1.0.0 staging
+
+# 再次创建同名归档（失败）
+python pipeline.py archive create test-archive 2.0.0 staging
+# 错误: Archive 'test-archive' already exists
+```
+
+### 36. 归档未成功发布的版本
+```bash
+python pipeline.py archive create test-archive 99.0.0 staging
+# 错误: Version '99.0.0' has no successful release in 'staging' environment
+```
+
+### 37. developer 归档 prod 环境
+```bash
+python pipeline.py archive create prod-archive 1.0.0 prod --role developer
+# 错误: Permission denied for 'archive.create.prod'. Required role: release-manager.
+```
+
+### 38. developer 撤销归档
+```bash
+python pipeline.py archive create test-archive 1.0.0 staging
+python pipeline.py archive revoke test-archive --role developer --reason "test"
+# 错误: Permission denied for 'archive.revoke'. Required role: release-manager.
+```
+
+### 39. 归档 prod 环境但缺少审批
+```bash
+# 先发布到 prod 但删除审批记录
+# 错误: Prod archive requires linked approval for version '1.0.0'
+```
+
+### 40. 导入归档摘要不匹配
+```bash
+# 导出归档后修改 config_summary 中的 config_hash
+python pipeline.py archive export test-archive --output test.json
+# 手动修改 test.json 中的 config_summary.config_hash
+python pipeline.py archive import test.json
+# 错误: Archive 'test-archive' Config hash mismatch. Archive content has changed.
+```
+
+### 41. 导入归档缺失版本
+```bash
+# 在新数据库中导入（对应版本未发布）
+python pipeline.py archive import test.json
+# 错误: Version '1.0.0' has no successful release in 'staging' environment
+```
+
+### 42. 同名导入无 --force
+```bash
+python pipeline.py archive create test-archive 1.0.0 staging
+python pipeline.py archive export test-archive --output test.json
+python pipeline.py archive import test.json
+# 错误: Archive 'test-archive' already exists. Use --force to overwrite.
+```
+
+### 43. 撤销后 verify 失败
+```bash
+python pipeline.py archive create test-archive 1.0.0 staging
+python pipeline.py archive revoke test-archive --role release-manager --reason "test"
+python pipeline.py archive verify test-archive
+# 错误: Archive 'test-archive' is revoked. Cannot verify.
+```
+
+### 44. 导入归档数据被篡改
+```bash
+# 导出归档后修改 release_result 或 config_summary
+python pipeline.py archive export test-archive --output test.json
+# 手动修改 test.json 中的 release_result 字段
+python pipeline.py archive import test.json
+# 错误: Archive 'test-archive' data integrity check failed. Data may be tampered.
 ```
 
 ---
@@ -1159,6 +1321,166 @@ python pipeline.py export --output pkg_persistence_audit.json --format json
 # 预期包含所有 package 相关的操作记录：create, sign, verify, show 等
 ```
 
+### 链路 16: 发布证据归档完整流程
+```bash
+# 初始化环境
+python pipeline.py init
+python pipeline.py import config_pipeline/examples/config_v1.json
+python pipeline.py import config_pipeline/examples/config_v2.json
+
+# 测试 1: developer 归档 prod 环境 - 失败
+python pipeline.py archive create prod-archive 1.0.0 prod --role developer
+# 预期错误：Permission denied for 'archive.create.prod'. Required role: release-manager.
+
+# 测试 2: 归档未成功发布的版本 - 失败
+python pipeline.py archive create test-archive 99.0.0 staging
+# 预期错误：Version '99.0.0' has no successful release in 'staging' environment
+
+# 测试 3: 发布到 staging
+python pipeline.py apply 1.0.0 staging --yes
+
+# 测试 4: developer 归档 staging 环境 - 成功
+python pipeline.py archive create staging-archive 1.0.0 staging --role developer
+# 预期：SUCCESS: Archive 'staging-archive' created successfully
+
+# 测试 5: 创建重复名称归档 - 失败
+python pipeline.py archive create staging-archive 2.0.0 staging
+# 预期错误：Archive 'staging-archive' already exists
+
+# 测试 6: 查看归档详情
+python pipeline.py archive show staging-archive
+# 预期显示：archive_name, environment, version, status, release_result, config_summary, created_by, created_at 等
+
+# 测试 7: 校验归档完整性
+python pipeline.py archive verify staging-archive
+# 预期：Archive 'staging-archive' is VALID. Integrity verified.
+
+# 测试 8: developer 撤销归档 - 失败
+python pipeline.py archive revoke staging-archive --role developer --reason "test"
+# 预期错误：Permission denied for 'archive.revoke'. Required role: release-manager.
+
+# 测试 9: release-manager 撤销归档 - 成功
+python pipeline.py archive revoke staging-archive --role release-manager --reason "需要重新归档"
+# 预期：SUCCESS: Archive 'staging-archive' revoked successfully
+
+# 测试 10: 撤销后 verify - 失败
+python pipeline.py archive verify staging-archive
+# 预期错误：Archive 'staging-archive' is revoked. Cannot verify.
+
+# 测试 11: 列出所有归档
+python pipeline.py archive list
+# 预期显示 staging-archive，状态为 revoked
+
+# 测试 12: 按状态筛选
+python pipeline.py archive list --status revoked
+# 预期显示 staging-archive
+
+# 测试 13: 按状态筛选 active
+python pipeline.py archive list --status active
+# 预期不显示 staging-archive
+```
+
+### 链路 17: 归档导入导出与跨系统迁移
+```bash
+# 初始化环境
+python pipeline.py init
+python pipeline.py import config_pipeline/examples/config_v1.json
+python pipeline.py import config_pipeline/examples/config_v2.json
+python pipeline.py apply 1.0.0 staging --yes
+python pipeline.py apply 2.0.0 staging --yes
+
+# 创建归档
+python pipeline.py archive create export-test 1.0.0 staging
+python pipeline.py archive create export-test-2 2.0.0 staging
+
+# 测试 1: 导出归档为 JSON
+python pipeline.py archive export export-test --output export-test.json
+# 预期：Archive 'export-test' exported to export-test.json
+
+# 测试 2: 验证导出文件结构
+# export-test.json 应包含：archive_format_version, archive_name, environment, version,
+# release_result, config_summary, summary_hash, created_by, created_at, status,
+# revoked_by, revoked_at, revoke_reason, _meta 等
+
+# 测试 3: 在新数据库中导入（版本未发布）- 失败
+Remove-Item pipeline.db -Force
+python pipeline.py init
+python pipeline.py import config_pipeline/examples/config_v1.json
+python pipeline.py archive import export-test.json
+# 预期错误：Version '1.0.0' has no successful release in 'staging' environment
+
+# 测试 4: 在新数据库中导入（版本已发布）- 成功
+python pipeline.py apply 1.0.0 staging --yes
+python pipeline.py archive import export-test.json
+# 预期：SUCCESS: Archive 'export-test' imported successfully
+
+# 测试 5: 验证导入后归档完整性
+python pipeline.py archive verify export-test
+# 预期：Archive 'export-test' is VALID. Integrity verified.
+
+# 测试 6: 验证导入后归档状态和字段
+python pipeline.py archive show export-test
+# 预期显示状态为 active，所有字段与导出时一致
+
+# 测试 7: 同名导入无 --force - 失败
+python pipeline.py archive import export-test.json
+# 预期错误：Archive 'export-test' already exists. Use --force to overwrite.
+
+# 测试 8: 同名导入有 --force（developer）- 失败
+python pipeline.py archive import export-test.json --force --role developer
+# 预期错误：Permission denied for 'archive.import.force'. Required role: release-manager.
+
+# 测试 9: 同名导入有 --force（release-manager）- 成功
+python pipeline.py archive import export-test.json --force --role release-manager
+# 预期：SUCCESS: Archive 'export-test' imported successfully (overwritten)
+
+# 测试 10: 验证导入撤销状态的归档
+# 先撤销再导出
+python pipeline.py archive revoke export-test-2 --role release-manager --reason "test revoke"
+python pipeline.py archive export export-test-2 --output revoked-test.json
+# 在新数据库中导入
+Remove-Item pipeline.db -Force
+python pipeline.py init
+python pipeline.py import config_pipeline/examples/config_v2.json
+python pipeline.py apply 2.0.0 staging --yes
+python pipeline.py archive import revoked-test.json --role release-manager
+python pipeline.py archive show revoked-test
+# 预期显示状态为 revoked，revoked_by 和 revoked_at 字段保留
+```
+
+### 链路 18: 归档跨重启持久化验证
+```bash
+# 初始化环境并创建归档
+python pipeline.py init
+python pipeline.py import config_pipeline/examples/config_v1.json
+python pipeline.py apply 1.0.0 staging --yes
+python pipeline.py archive create persist-archive 1.0.0 staging
+python pipeline.py archive create persist-archive-2 1.0.0 dev
+
+# 验证归档存在
+python pipeline.py archive list > archives_before.txt
+python pipeline.py archive show persist-archive > archive_detail_before.txt
+
+# 模拟重启（不需要特殊操作，SQLite 已持久化）
+# 关闭终端，重新打开，cd 到项目目录
+
+# 验证归档仍然存在
+python pipeline.py archive list > archives_after.txt
+# archives_before.txt 和 archives_after.txt 内容应该一致
+
+# 验证归档详情仍然一致
+python pipeline.py archive show persist-archive > archive_detail_after.txt
+# archive_detail_before.txt 和 archive_detail_after.txt 内容应该一致（除时间戳外）
+
+# 验证归档仍然可以校验
+python pipeline.py archive verify persist-archive
+# 预期：VALID
+
+# 验证审计记录完整
+python pipeline.py export --output archive_persistence_audit.json --format json
+# 预期包含所有 archive 相关的操作记录：create, verify, show, list 等
+```
+
 ---
 
 ## 🔄 重启验证命令
@@ -1235,7 +1557,8 @@ python pipeline.py lock-status
     │   ├── pending_cmd.py      # pending/pending-list 命令
     │   ├── preview_cmd.py      # preview/preview show 命令（发布预演和漂移检查）
     │   ├── window_cmd.py       # window 命令（发布窗口管理）
-    │   └── package_cmd.py      # package 命令（变更包签收管理）
+    │   ├── package_cmd.py      # package 命令（变更包签收管理）
+    │   └── archive_cmd.py      # archive 命令（发布证据归档管理）
     ├── utils/
     │   ├── __init__.py
     │   ├── errors.py           # 错误定义
@@ -1261,6 +1584,7 @@ python pipeline.py lock-status
 - `previews`: 发布预演记录（包含目标配置快照、环境指针快照、锁状态快照、审批状态快照、变更摘要）
 - `release_windows`: 发布窗口记录（环境、起止时间、原因、创建人、启用状态）
 - `change_packages`: 变更包记录（包名、目标环境、版本清单、配置摘要、摘要哈希、创建人、签收状态、签收人、签收时间、撤销人、撤销时间、撤销原因）
+- `archives`: 发布证据归档记录（归档名、环境、版本、发布结果、配置摘要、摘要哈希、关联审批ID、关联变更包ID、创建人、状态、撤销人、撤销时间、撤销原因、创建时间、更新时间）
 
 ## 审计导出内容
 
@@ -1277,3 +1601,5 @@ python pipeline.py lock-status
 - **窗口事件**: window_blocked, window_overridden, window_override_denied 等事件记录
 - **变更包事件**: package_create, package_sign, package_revoke, package_verify, package_export, package_import 等事件记录
 - **变更包详情**: 包名、目标环境、版本清单、配置摘要哈希、签收状态、签收人、撤销原因
+- **归档事件**: archive_create, archive_revoke, archive_verify, archive_export, archive_import 等事件记录
+- **归档详情**: 归档名、环境、版本、发布结果、配置摘要哈希、状态、关联审批、关联变更包、创建人、撤销人、撤销原因

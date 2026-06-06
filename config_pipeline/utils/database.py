@@ -16,6 +16,16 @@ from .errors import (
     InvalidWindowTimeError,
     OverlappingWindowError,
     WindowNotFoundError,
+    ArchiveAlreadyExistsError,
+    ArchiveNotFoundError,
+    ArchiveNotSuccessfulReleaseError,
+    ArchiveMissingApprovalError,
+    ArchiveSummaryMismatchError,
+    ArchiveRevokedError,
+    ArchiveImportConflictError,
+    InvalidArchiveFormatError,
+    PackageNotFoundError,
+    PackageVersionNotFoundError,
 )
 
 
@@ -210,6 +220,27 @@ def init_db():
         signoff_status TEXT NOT NULL DEFAULT 'pending',
         signed_by TEXT,
         signed_at TIMESTAMP,
+        revoked_by TEXT,
+        revoked_at TIMESTAMP,
+        revoke_reason TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    ''')
+
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS archives (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        archive_name TEXT UNIQUE NOT NULL,
+        environment TEXT NOT NULL,
+        version TEXT NOT NULL,
+        release_result TEXT NOT NULL,
+        config_summary TEXT NOT NULL,
+        summary_hash TEXT NOT NULL,
+        linked_approval_id INTEGER,
+        linked_package_id INTEGER,
+        created_by TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'active',
         revoked_by TEXT,
         revoked_at TIMESTAMP,
         revoke_reason TEXT,
@@ -1911,3 +1942,640 @@ def check_release_window(environment, version=None, override=False, override_rea
         }
     )
     raise err
+
+
+def compute_archive_summary(version, environment):
+    """Compute config summary and hash for an archive.
+
+    Returns (config_summary_dict, summary_hash_hex)
+    """
+    cfg = get_config(version)
+    if not cfg:
+        raise PackageVersionNotFoundError(version)
+
+    config_data = json.loads(cfg["config_json"])
+    config_hash = hashlib.sha256(
+        json.dumps(config_data, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+
+    release = get_release(version, environment)
+    release_result = {
+        "status": release["status"] if release else "unknown",
+        "release_id": release["id"] if release else None,
+        "approved_by": release.get("approved_by"),
+        "plan_summary": release.get("plan_summary"),
+        "released_at": release["created_at"] if release else None,
+    }
+
+    config_summary = {
+        "version": version,
+        "environment": environment,
+        "config_hash": config_hash,
+        "created_by": cfg["created_by"],
+        "created_at": cfg["created_at"],
+        "app_name": config_data.get("app_name"),
+        "features": sorted(config_data.get("features", {}).keys()),
+    }
+
+    hash_input = json.dumps({
+        "version": version,
+        "environment": environment,
+        "config_hash": config_hash,
+        "release_result": release_result,
+        "config_summary": config_summary,
+    }, sort_keys=True)
+    summary_hash = hashlib.sha256(hash_input.encode("utf-8")).hexdigest()
+
+    return config_summary, summary_hash, release_result
+
+
+def compute_archive_hash_from_data(archive_data):
+    """Compute summary hash from archive data itself (not from database).
+
+    This is used for import verification to ensure the exported data
+    hasn't been tampered with.
+
+    Args:
+        archive_data: Dict from export_archive
+
+    Returns:
+        Computed summary hash hex string
+    """
+    version = archive_data["version"]
+    environment = archive_data["environment"]
+    release_result = archive_data["release_result"]
+    config_summary = archive_data["config_summary"]
+
+    if isinstance(config_summary, str):
+        config_summary = json.loads(config_summary)
+    if isinstance(release_result, str):
+        release_result = json.loads(release_result)
+
+    config_hash = config_summary.get("config_hash")
+
+    hash_input = json.dumps({
+        "version": version,
+        "environment": environment,
+        "config_hash": config_hash,
+        "release_result": release_result,
+        "config_summary": config_summary,
+    }, sort_keys=True)
+    return hashlib.sha256(hash_input.encode("utf-8")).hexdigest()
+
+
+def archive_exists(archive_name):
+    """Check if an archive exists."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT 1 FROM archives WHERE archive_name = ?",
+            (archive_name,)
+        )
+        return cursor.fetchone() is not None
+
+
+def get_archive(archive_name):
+    """Get an archive by name. Returns dict or None."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM archives WHERE archive_name = ?",
+            (archive_name,)
+        )
+        row = cursor.fetchone()
+        if row:
+            return _row_to_archive_dict(row)
+        return None
+
+
+def get_all_archives(environment=None, status=None, limit=100):
+    """Get all archives, optionally filtered by environment and status."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        query = "SELECT * FROM archives WHERE 1=1"
+        params = []
+
+        if environment is not None:
+            query += " AND environment = ?"
+            params.append(environment)
+
+        if status is not None:
+            query += " AND status = ?"
+            params.append(status)
+
+        query += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+        return [_row_to_archive_dict(row) for row in rows]
+
+
+def _row_to_archive_dict(row):
+    """Convert an archive row to a dict with JSON fields parsed."""
+    return {
+        "id": row["id"],
+        "archive_name": row["archive_name"],
+        "environment": row["environment"],
+        "version": row["version"],
+        "release_result": json.loads(row["release_result"]),
+        "config_summary": json.loads(row["config_summary"]),
+        "summary_hash": row["summary_hash"],
+        "linked_approval_id": row["linked_approval_id"],
+        "linked_package_id": row["linked_package_id"],
+        "created_by": row["created_by"],
+        "status": row["status"],
+        "revoked_by": row["revoked_by"],
+        "revoked_at": row["revoked_at"],
+        "revoke_reason": row["revoke_reason"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def create_archive(archive_name, version, environment, linked_package_name=None, cli_role=None):
+    """Create a new release evidence archive.
+
+    Args:
+        archive_name: Unique name for the archive
+        version: Configuration version to archive
+        environment: Environment where the version was released
+        linked_package_name: Optional name of linked change package
+        cli_role: Optional role override
+
+    Returns:
+        Archive dict
+
+    Raises:
+        ArchiveAlreadyExistsError
+        ArchiveNotSuccessfulReleaseError
+        ArchiveMissingApprovalError
+        PermissionDeniedError
+        EnvironmentError
+        PackageNotFoundError
+    """
+    current_role = get_role(cli_role)
+
+    if environment not in VALID_ENVIRONMENTS:
+        raise EnvironmentError(environment, VALID_ENVIRONMENTS)
+
+    if environment == "prod":
+        check_permission("archive.create.prod", "release-manager", cli_role)
+
+    if archive_exists(archive_name):
+        raise ArchiveAlreadyExistsError(archive_name)
+
+    if not has_successful_release(version, environment):
+        raise ArchiveNotSuccessfulReleaseError(version, environment)
+
+    if environment == "prod":
+        approval = get_approval(version, environment)
+        if not approval or approval["status"] != "approved":
+            raise ArchiveMissingApprovalError(version, environment)
+
+    linked_package_id = None
+    if linked_package_name:
+        pkg = get_package(linked_package_name)
+        if not pkg:
+            raise PackageNotFoundError(linked_package_name)
+        linked_package_id = pkg["id"]
+
+    approval_id = None
+    if environment == "prod":
+        approval = get_approval(version, environment)
+        if approval:
+            approval_id = approval["id"]
+
+    config_summary, summary_hash, release_result = compute_archive_summary(version, environment)
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO archives
+            (archive_name, environment, version, release_result, config_summary,
+             summary_hash, linked_approval_id, linked_package_id, created_by, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
+        ''', (
+            archive_name,
+            environment,
+            version,
+            json.dumps(release_result),
+            json.dumps(config_summary),
+            summary_hash,
+            approval_id,
+            linked_package_id,
+            get_current_user(),
+        ))
+
+    log_audit(
+        "archive.create",
+        "success",
+        environment=environment,
+        version=version,
+        details={
+            "archive_name": archive_name,
+            "summary_hash": summary_hash,
+            "linked_package": linked_package_name,
+            "role": current_role,
+        }
+    )
+
+    return get_archive(archive_name)
+
+
+def verify_archive(archive_name):
+    """Verify an archive's integrity.
+
+    Checks:
+    1. Archive exists and is not revoked
+    2. Config version still exists
+    3. Config content hasn't changed (hash matches)
+    4. Summary hash matches
+
+    Returns (is_valid, issues_list)
+    """
+    archive = get_archive(archive_name)
+    if not archive:
+        raise ArchiveNotFoundError(archive_name)
+
+    issues = []
+
+    if archive["status"] == "revoked":
+        issues.append(f"Archive '{archive_name}' has been revoked")
+
+    version = archive["version"]
+    environment = archive["environment"]
+    expected_hash = archive["config_summary"]["config_hash"]
+
+    if not config_exists(version):
+        issues.append(f"Version '{version}' no longer exists in configs")
+    else:
+        cfg = get_config(version)
+        config_data = json.loads(cfg["config_json"])
+        actual_hash = hashlib.sha256(
+            json.dumps(config_data, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+
+        if actual_hash != expected_hash:
+            issues.append(
+                f"Version '{version}' content has changed. "
+                f"Expected hash: {expected_hash[:12]}..., "
+                f"Actual: {actual_hash[:12]}..."
+            )
+
+    try:
+        _, actual_summary_hash, _ = compute_archive_summary(version, environment)
+        if actual_summary_hash != archive["summary_hash"]:
+            issues.append(
+                f"Archive summary hash mismatch. "
+                f"Expected: {archive['summary_hash'][:12]}..., "
+                f"Actual: {actual_summary_hash[:12]}..."
+            )
+    except Exception as e:
+        issues.append(str(e))
+
+    return len(issues) == 0, issues
+
+
+def revoke_archive(archive_name, cli_role=None, reason=None):
+    """Revoke an archive. Only release-manager can revoke.
+
+    Returns True if successful.
+
+    Raises:
+        ArchiveNotFoundError
+        ArchiveRevokedError (already revoked)
+        PermissionDeniedError
+    """
+    archive = get_archive(archive_name)
+    if not archive:
+        raise ArchiveNotFoundError(archive_name)
+
+    if archive["status"] == "revoked":
+        raise ArchiveRevokedError(archive_name)
+
+    check_permission("archive.revoke", "release-manager", cli_role)
+
+    current_role = get_role(cli_role)
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            UPDATE archives
+            SET status = 'revoked',
+                revoked_by = ?,
+                revoked_at = CURRENT_TIMESTAMP,
+                revoke_reason = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE archive_name = ? AND status != 'revoked'
+        ''', (get_current_user(), reason, archive_name))
+        if cursor.rowcount == 0:
+            raise ArchiveRevokedError(archive_name)
+
+    log_audit(
+        "archive.revoke",
+        "success",
+        environment=archive["environment"],
+        version=archive["version"],
+        details={
+            "archive_name": archive_name,
+            "revoked_by": get_current_user(),
+            "reason": reason,
+            "role": current_role,
+        }
+    )
+
+    return True
+
+
+def export_archive(archive_name):
+    """Export an archive to a dict for JSON serialization."""
+    archive = get_archive(archive_name)
+    if not archive:
+        raise ArchiveNotFoundError(archive_name)
+
+    return {
+        "archive_format_version": "1.0",
+        "archive_name": archive["archive_name"],
+        "environment": archive["environment"],
+        "version": archive["version"],
+        "release_result": archive["release_result"],
+        "config_summary": archive["config_summary"],
+        "summary_hash": archive["summary_hash"],
+        "linked_package_name": None,
+        "created_by": archive["created_by"],
+        "created_at": archive["created_at"],
+        "status": archive["status"],
+        "revoked_by": archive["revoked_by"],
+        "revoked_at": archive["revoked_at"],
+        "revoke_reason": archive["revoke_reason"],
+        "_meta": {
+            "exported_at": get_current_time(),
+            "exported_by": get_current_user(),
+        }
+    }
+
+
+def import_archive(archive_data, cli_role=None, force=False):
+    """Import an archive from exported data.
+
+    Args:
+        archive_data: Dict from export_archive
+        cli_role: Optional role override
+        force: If True, overwrite existing archive
+
+    Returns:
+        Imported archive dict
+
+    Raises:
+        InvalidArchiveFormatError
+        ArchiveImportConflictError (unless force=True)
+        ArchiveNotSuccessfulReleaseError
+        ArchiveMissingApprovalError
+        ArchiveSummaryMismatchError
+        PermissionDeniedError
+        EnvironmentError
+    """
+    required_fields = [
+        "archive_name", "environment", "version",
+        "release_result", "config_summary", "summary_hash",
+    ]
+    for field in required_fields:
+        if field not in archive_data:
+            raise InvalidArchiveFormatError(f"Missing required field: {field}")
+
+    archive_name = archive_data["archive_name"]
+    environment = archive_data["environment"]
+    version = archive_data["version"]
+    expected_hash = archive_data["summary_hash"]
+    status = archive_data.get("status", "active")
+
+    if environment not in VALID_ENVIRONMENTS:
+        raise EnvironmentError(environment, VALID_ENVIRONMENTS)
+
+    current_role = get_role(cli_role)
+
+    if environment == "prod":
+        check_permission("archive.import.prod", "release-manager", cli_role)
+
+    if archive_exists(archive_name):
+        if force:
+            if environment == "prod":
+                check_permission("archive.import.force.prod", "release-manager", cli_role)
+        else:
+            raise ArchiveImportConflictError(archive_name)
+
+    if not has_successful_release(version, environment):
+        log_error(
+            "archive.import",
+            "ARCHIVE_NOT_SUCCESSFUL_RELEASE",
+            f"Version '{version}' has no successful release in '{environment}'",
+            environment=environment,
+            version=version,
+            details={"archive_name": archive_name}
+        )
+        log_audit(
+            "archive.import",
+            "failed",
+            environment=environment,
+            version=version,
+            error_reason=f"Version '{version}' has no successful release in '{environment}'",
+            details={"archive_name": archive_name, "role": current_role}
+        )
+        raise ArchiveNotSuccessfulReleaseError(version, environment)
+
+    if environment == "prod":
+        approval = get_approval(version, environment)
+        if not approval or approval["status"] != "approved":
+            log_error(
+                "archive.import",
+                "ARCHIVE_MISSING_APPROVAL",
+                f"Prod archive requires approval for version '{version}'",
+                environment=environment,
+                version=version,
+                details={"archive_name": archive_name}
+            )
+            log_audit(
+                "archive.import",
+                "failed",
+                environment=environment,
+                version=version,
+                error_reason=f"Prod archive requires approval for version '{version}'",
+                details={"archive_name": archive_name, "role": current_role}
+            )
+            raise ArchiveMissingApprovalError(version, environment)
+
+    try:
+        cfg = get_config(version)
+        if not cfg:
+            raise PackageVersionNotFoundError(version)
+        config_data = json.loads(cfg["config_json"])
+        current_config_hash = hashlib.sha256(
+            json.dumps(config_data, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+    except PackageVersionNotFoundError as e:
+        log_error(
+            "archive.import",
+            "ARCHIVE_VERSION_NOT_FOUND",
+            f"Version '{version}' not found for archive '{archive_name}'",
+            environment=environment,
+            details={"archive_name": archive_name, "missing_version": version}
+        )
+        log_audit(
+            "archive.import",
+            "failed",
+            environment=environment,
+            version=version,
+            error_reason=f"Version '{version}' not found",
+            details={"archive_name": archive_name, "role": current_role}
+        )
+        raise
+
+    config_summary = archive_data["config_summary"]
+    if isinstance(config_summary, str):
+        config_summary = json.loads(config_summary)
+    archived_config_hash = config_summary.get("config_hash")
+
+    if current_config_hash != archived_config_hash:
+        log_error(
+            "archive.import",
+            "ARCHIVE_SUMMARY_MISMATCH",
+            f"Config hash mismatch for archive '{archive_name}'. Archive content has changed.",
+            environment=environment,
+            version=version,
+            details={
+                "archive_name": archive_name,
+                "expected_hash": archived_config_hash,
+                "actual_hash": current_config_hash,
+            }
+        )
+        log_audit(
+            "archive.import",
+            "failed",
+            environment=environment,
+            version=version,
+            error_reason=f"Config hash mismatch for archive '{archive_name}'",
+            details={
+                "archive_name": archive_name,
+                "expected_hash": archived_config_hash,
+                "actual_hash": current_config_hash,
+                "role": current_role,
+            }
+        )
+        raise ArchiveSummaryMismatchError(archive_name, archived_config_hash, current_config_hash)
+
+    computed_hash = compute_archive_hash_from_data(archive_data)
+    if computed_hash != expected_hash:
+        log_error(
+            "archive.import",
+            "ARCHIVE_SUMMARY_MISMATCH",
+            f"Archive data integrity check failed for '{archive_name}'. Data may be tampered.",
+            environment=environment,
+            version=version,
+            details={
+                "archive_name": archive_name,
+                "expected_hash": expected_hash,
+                "actual_hash": computed_hash,
+            }
+        )
+        log_audit(
+            "archive.import",
+            "failed",
+            environment=environment,
+            version=version,
+            error_reason=f"Archive data integrity check failed for '{archive_name}'",
+            details={
+                "archive_name": archive_name,
+                "expected_hash": expected_hash,
+                "actual_hash": computed_hash,
+                "role": current_role,
+            }
+        )
+        raise ArchiveSummaryMismatchError(archive_name, expected_hash, computed_hash)
+
+    release_result = archive_data["release_result"]
+    config_summary = archive_data["config_summary"]
+
+    approval_id = None
+    if environment == "prod":
+        approval = get_approval(version, environment)
+        if approval:
+            approval_id = approval["id"]
+
+    linked_package_id = None
+    linked_package_name = archive_data.get("linked_package_name")
+    if linked_package_name:
+        pkg = get_package(linked_package_name)
+        if pkg:
+            linked_package_id = pkg["id"]
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        if archive_exists(archive_name) and force:
+            cursor.execute('''
+                UPDATE archives
+                SET environment = ?,
+                    version = ?,
+                    release_result = ?,
+                    config_summary = ?,
+                    summary_hash = ?,
+                    linked_approval_id = ?,
+                    linked_package_id = ?,
+                    status = ?,
+                    revoked_by = ?,
+                    revoked_at = ?,
+                    revoke_reason = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE archive_name = ?
+            ''', (
+                environment,
+                version,
+                json.dumps(release_result),
+                json.dumps(config_summary),
+                expected_hash,
+                approval_id,
+                linked_package_id,
+                status,
+                archive_data.get("revoked_by"),
+                archive_data.get("revoked_at"),
+                archive_data.get("revoke_reason"),
+                archive_name,
+            ))
+        else:
+            cursor.execute('''
+                INSERT INTO archives
+                (archive_name, environment, version, release_result, config_summary,
+                 summary_hash, linked_approval_id, linked_package_id, created_by,
+                 status, revoked_by, revoked_at, revoke_reason)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                archive_name,
+                environment,
+                version,
+                json.dumps(release_result),
+                json.dumps(config_summary),
+                expected_hash,
+                approval_id,
+                linked_package_id,
+                archive_data.get("created_by", get_current_user()),
+                status,
+                archive_data.get("revoked_by"),
+                archive_data.get("revoked_at"),
+                archive_data.get("revoke_reason"),
+            ))
+
+    log_audit(
+        "archive.import",
+        "success",
+        environment=environment,
+        version=version,
+        details={
+            "archive_name": archive_name,
+            "summary_hash": expected_hash,
+            "status": status,
+            "role": current_role,
+            "force": force,
+        }
+    )
+
+    return get_archive(archive_name)

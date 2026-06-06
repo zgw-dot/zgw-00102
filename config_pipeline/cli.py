@@ -17,6 +17,7 @@ from .commands.preview_cmd import preview
 from .commands.batch_cmd import batch
 from .commands.package_cmd import package
 from .commands.window_cmd import window
+from .commands.archive_cmd import archive
 from .utils import PipelineNotInitializedError
 
 
@@ -47,6 +48,7 @@ cli.add_command(preview, name="preview")
 cli.add_command(batch, name="batch")
 cli.add_command(package, name="package")
 cli.add_command(window, name="window")
+cli.add_command(archive, name="archive")
 
 
 def main():

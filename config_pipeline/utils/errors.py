@@ -309,3 +309,79 @@ class InvalidPackageFormatError(PipelineError):
         self.reason = reason
         message = f"Invalid package format: {reason}"
         super().__init__(message, code="INVALID_PACKAGE_FORMAT")
+
+
+class ArchiveAlreadyExistsError(PipelineError):
+    """Archive with this name already exists"""
+    def __init__(self, archive_name):
+        self.archive_name = archive_name
+        message = f"Archive '{archive_name}' already exists"
+        super().__init__(message, code="ARCHIVE_ALREADY_EXISTS")
+
+
+class ArchiveNotFoundError(PipelineError):
+    """Archive not found"""
+    def __init__(self, archive_name):
+        self.archive_name = archive_name
+        message = f"Archive '{archive_name}' not found"
+        super().__init__(message, code="ARCHIVE_NOT_FOUND")
+
+
+class ArchiveNotSuccessfulReleaseError(PipelineError):
+    """Cannot archive an unsuccessful release"""
+    def __init__(self, version, environment):
+        self.version = version
+        self.environment = environment
+        message = f"Version '{version}' has no successful release in '{environment}' environment"
+        super().__init__(message, code="ARCHIVE_NOT_SUCCESSFUL_RELEASE")
+
+
+class ArchiveMissingApprovalError(PipelineError):
+    """Prod archive requires linked approval"""
+    def __init__(self, version, environment):
+        self.version = version
+        self.environment = environment
+        message = f"Archive for prod requires linked approval for version '{version}'"
+        super().__init__(message, code="ARCHIVE_MISSING_APPROVAL")
+
+
+class ArchiveSummaryMismatchError(PipelineError):
+    """Archive summary mismatch during import"""
+    def __init__(self, archive_name, expected_hash, actual_hash):
+        self.archive_name = archive_name
+        self.expected_hash = expected_hash
+        self.actual_hash = actual_hash
+        message = f"Archive '{archive_name}' summary mismatch during import. Expected: {expected_hash[:12]}..., Actual: {actual_hash[:12]}..."
+        super().__init__(message, code="ARCHIVE_SUMMARY_MISMATCH")
+
+
+class ArchiveRevokedError(PipelineError):
+    """Archive has been revoked"""
+    def __init__(self, archive_name):
+        self.archive_name = archive_name
+        message = f"Archive '{archive_name}' has been revoked"
+        super().__init__(message, code="ARCHIVE_REVOKED")
+
+
+class ArchiveNotRevokedError(PipelineError):
+    """Archive is not revoked, cannot verify as revoked"""
+    def __init__(self, archive_name):
+        self.archive_name = archive_name
+        message = f"Archive '{archive_name}' is not revoked"
+        super().__init__(message, code="ARCHIVE_NOT_REVOKED")
+
+
+class InvalidArchiveFormatError(PipelineError):
+    """Invalid archive format during import"""
+    def __init__(self, reason):
+        self.reason = reason
+        message = f"Invalid archive format: {reason}"
+        super().__init__(message, code="INVALID_ARCHIVE_FORMAT")
+
+
+class ArchiveImportConflictError(PipelineError):
+    """Archive name conflict during import"""
+    def __init__(self, archive_name):
+        self.archive_name = archive_name
+        message = f"Archive '{archive_name}' already exists. Use --force to overwrite."
+        super().__init__(message, code="ARCHIVE_IMPORT_CONFLICT")
