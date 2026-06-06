@@ -154,6 +154,29 @@ def init_db():
     )
     ''')
 
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS previews (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        version TEXT NOT NULL,
+        environment TEXT NOT NULL,
+        target_config_json TEXT NOT NULL,
+        current_version TEXT,
+        current_config_json TEXT,
+        env_pointer_snapshot TEXT NOT NULL,
+        lock_snapshot TEXT NOT NULL,
+        approval_snapshot TEXT NOT NULL,
+        plan_summary TEXT NOT NULL,
+        diff_json TEXT NOT NULL,
+        requires_approval INTEGER NOT NULL DEFAULT 0,
+        requires_staging INTEGER NOT NULL DEFAULT 0,
+        is_locked INTEGER NOT NULL DEFAULT 0,
+        has_changes INTEGER NOT NULL DEFAULT 0,
+        created_by TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(version, environment)
+    )
+    ''')
+
     cursor.execute("PRAGMA table_info(releases)")
     columns = [col[1] for col in cursor.fetchall()]
     if "conflict_reason" not in columns:
@@ -805,3 +828,157 @@ def import_snapshot(snapshot_data, force=False, role=None):
     finally:
         if conn:
             conn.close()
+
+
+def insert_preview(version, environment, target_config, current_version, current_config,
+                   plan_summary, diff, requires_approval, requires_staging, is_locked, has_changes):
+    """Insert or replace a preview record."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+
+        env_pointer_snapshot = json.dumps({
+            env: get_current_version(env) for env in VALID_ENVIRONMENTS
+        })
+
+        lock_snapshot = json.dumps({
+            env: is_environment_locked(env) for env in VALID_ENVIRONMENTS
+        })
+
+        approval_snapshot = json.dumps({
+            "is_approved": is_approved(version, environment),
+            "approval_status": get_approval(version, environment)
+        })
+
+        cursor.execute('''
+            INSERT OR REPLACE INTO previews 
+            (version, environment, target_config_json, current_version, current_config_json,
+             env_pointer_snapshot, lock_snapshot, approval_snapshot, plan_summary, diff_json,
+             requires_approval, requires_staging, is_locked, has_changes, created_by)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            version,
+            environment,
+            json.dumps(target_config),
+            current_version,
+            json.dumps(current_config) if current_config else None,
+            env_pointer_snapshot,
+            lock_snapshot,
+            approval_snapshot,
+            json.dumps(plan_summary),
+            json.dumps(diff),
+            1 if requires_approval else 0,
+            1 if requires_staging else 0,
+            1 if is_locked else 0,
+            1 if has_changes else 0,
+            get_current_user()
+        ))
+
+
+def get_latest_preview(version=None, environment=None):
+    """Get the latest preview, optionally filtered by version and environment."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        query = "SELECT * FROM previews WHERE 1=1"
+        params = []
+
+        if version:
+            query += " AND version = ?"
+            params.append(version)
+        if environment:
+            query += " AND environment = ?"
+            params.append(environment)
+
+        query += " ORDER BY id DESC LIMIT 1"
+        cursor.execute(query, params)
+        row = cursor.fetchone()
+        if row:
+            return _row_to_preview_dict(row)
+        return None
+
+
+def get_preview_by_id(preview_id):
+    """Get a preview by ID."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM previews WHERE id = ?", (preview_id,))
+        row = cursor.fetchone()
+        if row:
+            return _row_to_preview_dict(row)
+        return None
+
+
+def get_all_previews(limit=100):
+    """Get all previews, most recent first."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM previews ORDER BY id DESC LIMIT ?", (limit,))
+        rows = cursor.fetchall()
+        return [_row_to_preview_dict(row) for row in rows]
+
+
+def _row_to_preview_dict(row):
+    """Convert a preview row to a dict with JSON fields parsed."""
+    return {
+        "id": row["id"],
+        "version": row["version"],
+        "environment": row["environment"],
+        "target_config": json.loads(row["target_config_json"]),
+        "current_version": row["current_version"],
+        "current_config": json.loads(row["current_config_json"]) if row["current_config_json"] else None,
+        "env_pointer_snapshot": json.loads(row["env_pointer_snapshot"]),
+        "lock_snapshot": json.loads(row["lock_snapshot"]),
+        "approval_snapshot": json.loads(row["approval_snapshot"]),
+        "plan_summary": json.loads(row["plan_summary"]),
+        "diff": json.loads(row["diff_json"]),
+        "requires_approval": row["requires_approval"] == 1,
+        "requires_staging": row["requires_staging"] == 1,
+        "is_locked": row["is_locked"] == 1,
+        "has_changes": row["has_changes"] == 1,
+        "created_by": row["created_by"],
+        "created_at": row["created_at"],
+    }
+
+
+def check_preview_drift(preview):
+    """Check if the preview has drifted from current state.
+    
+    Returns a list of drift reasons. Empty list means no drift.
+    """
+    drift_reasons = []
+
+    # Check environment pointer drift
+    for env in VALID_ENVIRONMENTS:
+        current_pointer = get_current_version(env)
+        snapshot_pointer = preview["env_pointer_snapshot"].get(env)
+        if current_pointer != snapshot_pointer:
+            drift_reasons.append(
+                f"Environment '{env}' pointer changed: '{snapshot_pointer}' -> '{current_pointer}'"
+            )
+
+    # Check lock status drift for target environment
+    current_lock = is_environment_locked(preview["environment"])
+    snapshot_lock = preview["lock_snapshot"].get(preview["environment"], False)
+    if current_lock != snapshot_lock:
+        lock_change = "locked" if current_lock else "unlocked"
+        drift_reasons.append(
+            f"Environment '{preview['environment']}' is now {lock_change}"
+        )
+
+    # Check if target config still exists
+    if not config_exists(preview["version"]):
+        drift_reasons.append(
+            f"Target version '{preview['version']}' no longer exists in configs"
+        )
+
+    return drift_reasons
+
+
+def delete_preview(version, environment):
+    """Delete a preview record."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM previews WHERE version = ? AND environment = ?",
+            (version, environment)
+        )
+        return cursor.rowcount > 0

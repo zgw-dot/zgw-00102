@@ -16,6 +16,10 @@ from .errors import (
     PendingApprovalExistsError,
     EnvironmentNotLockedError,
     AlreadyLockedError,
+    PreviewNotFoundError,
+    PreviewDriftError,
+    PreviewAckDeniedError,
+    PreviewNoChangesError,
 )
 from .database import (
     VALID_ENVIRONMENTS,
@@ -64,6 +68,12 @@ from .database import (
     get_snapshot_data,
     check_snapshot_conflicts,
     import_snapshot,
+    insert_preview,
+    get_latest_preview,
+    get_preview_by_id,
+    get_all_previews,
+    check_preview_drift,
+    delete_preview,
 )
 from .diff import compute_diff, has_changes, format_diff, generate_plan_summary
 
@@ -85,6 +95,10 @@ __all__ = [
     "PendingApprovalExistsError",
     "EnvironmentNotLockedError",
     "AlreadyLockedError",
+    "PreviewNotFoundError",
+    "PreviewDriftError",
+    "PreviewAckDeniedError",
+    "PreviewNoChangesError",
     "VALID_ENVIRONMENTS",
     "VALID_ROLES",
     "REQUIRED_KEYS",
@@ -131,6 +145,12 @@ __all__ = [
     "get_snapshot_data",
     "check_snapshot_conflicts",
     "import_snapshot",
+    "insert_preview",
+    "get_latest_preview",
+    "get_preview_by_id",
+    "get_all_previews",
+    "check_preview_drift",
+    "delete_preview",
     "compute_diff",
     "has_changes",
     "format_diff",

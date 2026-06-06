@@ -152,3 +152,39 @@ class AlreadyLockedError(PipelineError):
         by_part = f" (locked by {locked_by})" if locked_by else ""
         message = f"Environment '{environment}' is already locked.{reason_part}{by_part}"
         super().__init__(message, code="ALREADY_LOCKED")
+
+
+class PreviewNotFoundError(PipelineError):
+    """Preview not found error"""
+    def __init__(self, version=None, environment=None):
+        self.version = version
+        self.environment = environment
+        if version and environment:
+            message = f"No preview found for version '{version}' in environment '{environment}'"
+        else:
+            message = "No preview found"
+        super().__init__(message, code="PREVIEW_NOT_FOUND")
+
+
+class PreviewDriftError(PipelineError):
+    """Preview drift detected error"""
+    def __init__(self, drift_reasons):
+        self.drift_reasons = drift_reasons
+        reasons_str = "\n  - ".join(drift_reasons)
+        message = f"Preview drift detected. State has changed since preview:\n  - {reasons_str}"
+        super().__init__(message, code="PREVIEW_DRIFT")
+
+
+class PreviewAckDeniedError(PipelineError):
+    """Preview drift acknowledgment denied error"""
+    def __init__(self, reason):
+        self.reason = reason
+        message = f"Cannot acknowledge drift: {reason}. Only release-manager can acknowledge drift."
+        super().__init__(message, code="PREVIEW_ACK_DENIED")
+
+
+class PreviewNoChangesError(PipelineError):
+    """Preview has no changes error"""
+    def __init__(self):
+        message = "Preview shows no changes between current and target configuration"
+        super().__init__(message, code="PREVIEW_NO_CHANGES")
