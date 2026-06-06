@@ -9,6 +9,9 @@ from .commands.apply_cmd import apply
 from .commands.history_cmd import history
 from .commands.rollback_cmd import rollback
 from .commands.export_cmd import export
+from .commands.lock_cmd import lock, unlock, lock_status
+from .commands.approve_cmd import approve, reject
+from .commands.pending_cmd import pending_request, pending_list
 from .utils import PipelineNotInitializedError
 
 
@@ -27,6 +30,13 @@ cli.add_command(apply, name="apply")
 cli.add_command(history, name="history")
 cli.add_command(rollback, name="rollback")
 cli.add_command(export, name="export")
+cli.add_command(lock, name="lock")
+cli.add_command(unlock, name="unlock")
+cli.add_command(lock_status, name="lock-status")
+cli.add_command(approve, name="approve")
+cli.add_command(reject, name="reject")
+cli.add_command(pending_request, name="pending")
+cli.add_command(pending_list, name="pending-list")
 
 
 def main():

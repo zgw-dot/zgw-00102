@@ -5,10 +5,17 @@ import getpass
 from datetime import datetime
 from contextlib import contextmanager
 
-from .errors import PipelineNotInitializedError
+from .errors import (
+    PipelineNotInitializedError,
+    InvalidRoleError,
+    PermissionDeniedError,
+)
 
 
 VALID_ENVIRONMENTS = ["dev", "staging", "prod"]
+VALID_ROLES = ["developer", "release-manager"]
+ROLE_ENV_VAR = "PIPELINE_ROLE"
+APPROVAL_REQUIRED_ENVS = ["prod"]
 REQUIRED_KEYS = ["app_name", "version", "features", "database", "api_endpoints"]
 
 DB_FILENAME = "pipeline.db"
@@ -119,9 +126,48 @@ def init_db():
     )
     ''')
 
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS environment_locks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        environment TEXT UNIQUE NOT NULL,
+        is_locked INTEGER NOT NULL DEFAULT 0,
+        lock_reason TEXT,
+        locked_by TEXT,
+        locked_at TIMESTAMP,
+        conflict_reason TEXT
+    )
+    ''')
+
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS approvals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        version TEXT NOT NULL,
+        environment TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        requested_by TEXT NOT NULL,
+        requested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        approved_by TEXT,
+        approved_at TIMESTAMP,
+        notes TEXT,
+        conflict_reason TEXT,
+        UNIQUE(version, environment)
+    )
+    ''')
+
+    cursor.execute("PRAGMA table_info(releases)")
+    columns = [col[1] for col in cursor.fetchall()]
+    if "conflict_reason" not in columns:
+        cursor.execute("ALTER TABLE releases ADD COLUMN conflict_reason TEXT")
+    if "approved_by" not in columns:
+        cursor.execute("ALTER TABLE releases ADD COLUMN approved_by TEXT")
+
     for env in VALID_ENVIRONMENTS:
         cursor.execute(
             "INSERT OR IGNORE INTO environments (name, current_version) VALUES (?, NULL)",
+            (env,)
+        )
+        cursor.execute(
+            "INSERT OR IGNORE INTO environment_locks (environment, is_locked) VALUES (?, 0)",
             (env,)
         )
 
@@ -217,20 +263,22 @@ def set_current_version(env, version):
         ''', (version, env))
 
 
-def insert_release(version, environment, config_json, status, plan_summary=None):
+def insert_release(version, environment, config_json, status, plan_summary=None, approved_by=None, conflict_reason=None):
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute('''
             INSERT INTO releases 
-            (version, environment, config_json, status, created_by, plan_summary)
-            VALUES (?, ?, ?, ?, ?, ?)
+            (version, environment, config_json, status, created_by, plan_summary, approved_by, conflict_reason)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             version,
             environment,
             json.dumps(config_json),
             status,
             get_current_user(),
-            plan_summary
+            plan_summary,
+            approved_by,
+            conflict_reason
         ))
 
 
@@ -320,3 +368,211 @@ def get_environment_status():
         cursor.execute("SELECT * FROM environments ORDER BY name")
         rows = cursor.fetchall()
         return [dict(row) for row in rows]
+
+
+def get_role(cli_role=None):
+    """Get role from CLI parameter or environment variable."""
+    role = cli_role or os.environ.get(ROLE_ENV_VAR)
+    if not role:
+        role = "developer"
+    if role not in VALID_ROLES:
+        raise InvalidRoleError(role, VALID_ROLES)
+    return role
+
+
+def check_permission(action, required_role, cli_role=None):
+    """Check if current role has permission for the given action."""
+    current_role = get_role(cli_role)
+    role_hierarchy = {
+        "developer": 1,
+        "release-manager": 2,
+    }
+    if role_hierarchy.get(current_role, 0) < role_hierarchy.get(required_role, 999):
+        raise PermissionDeniedError(action, required_role, current_role)
+    return True
+
+
+def is_environment_locked(environment):
+    """Check if an environment is locked."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT is_locked FROM environment_locks WHERE environment = ?",
+            (environment,)
+        )
+        row = cursor.fetchone()
+        return row["is_locked"] == 1 if row else False
+
+
+def get_environment_lock(environment):
+    """Get lock details for an environment."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM environment_locks WHERE environment = ?",
+            (environment,)
+        )
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+
+def get_all_environment_locks():
+    """Get lock status for all environments."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM environment_locks ORDER BY environment")
+        rows = cursor.fetchall()
+        return [dict(row) for row in rows]
+
+
+def lock_environment(environment, reason=None, conflict_reason=None):
+    """Lock an environment."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT is_locked FROM environment_locks WHERE environment = ?",
+            (environment,)
+        )
+        row = cursor.fetchone()
+        if row and row["is_locked"] == 1:
+            return False
+        cursor.execute('''
+            UPDATE environment_locks
+            SET is_locked = 1, lock_reason = ?, locked_by = ?, locked_at = CURRENT_TIMESTAMP, conflict_reason = ?
+            WHERE environment = ?
+        ''', (reason, get_current_user(), conflict_reason, environment))
+        return True
+
+
+def unlock_environment(environment):
+    """Unlock an environment."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT is_locked FROM environment_locks WHERE environment = ?",
+            (environment,)
+        )
+        row = cursor.fetchone()
+        if not row or row["is_locked"] == 0:
+            return False
+        cursor.execute('''
+            UPDATE environment_locks
+            SET is_locked = 0, lock_reason = NULL, locked_by = NULL, locked_at = NULL, conflict_reason = NULL
+            WHERE environment = ?
+        ''', (environment,))
+        return True
+
+
+def requires_approval(environment):
+    """Check if an environment requires approval for releases."""
+    return environment in APPROVAL_REQUIRED_ENVS
+
+
+def create_pending_approval(version, environment, notes=None):
+    """Create a pending approval for a version in an environment."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute('''
+                INSERT INTO approvals (version, environment, status, requested_by, notes)
+                VALUES (?, ?, 'pending', ?, ?)
+            ''', (version, environment, get_current_user(), notes))
+            return True
+        except sqlite3.IntegrityError:
+            return False
+
+
+def get_approval(version, environment):
+    """Get approval record for a version in an environment."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT * FROM approvals
+            WHERE version = ? AND environment = ?
+            ORDER BY id DESC LIMIT 1
+        ''', (version, environment))
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+
+def get_pending_approvals(environment=None):
+    """Get all pending approvals, optionally filtered by environment."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        if environment:
+            cursor.execute('''
+                SELECT * FROM approvals
+                WHERE status = 'pending' AND environment = ?
+                ORDER BY requested_at DESC
+            ''', (environment,))
+        else:
+            cursor.execute('''
+                SELECT * FROM approvals
+                WHERE status = 'pending'
+                ORDER BY requested_at DESC
+            ''')
+        rows = cursor.fetchall()
+        return [dict(row) for row in rows]
+
+
+def get_all_approvals(environment=None, limit=100):
+    """Get all approvals, optionally filtered by environment."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        if environment:
+            cursor.execute('''
+                SELECT * FROM approvals
+                WHERE environment = ?
+                ORDER BY requested_at DESC LIMIT ?
+            ''', (environment, limit))
+        else:
+            cursor.execute('''
+                SELECT * FROM approvals
+                ORDER BY requested_at DESC LIMIT ?
+            ''', (limit,))
+        rows = cursor.fetchall()
+        return [dict(row) for row in rows]
+
+
+def is_approved(version, environment):
+    """Check if a version is approved for an environment."""
+    if not requires_approval(environment):
+        return True
+    approval = get_approval(version, environment)
+    return approval is not None and approval["status"] == "approved"
+
+
+def approve_version(version, environment, cli_role=None, notes=None):
+    """Approve a version for release to an environment."""
+    check_permission("approve", "release-manager", cli_role)
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            UPDATE approvals
+            SET status = 'approved', approved_by = ?, approved_at = CURRENT_TIMESTAMP, notes = ?
+            WHERE version = ? AND environment = ? AND status = 'pending'
+        ''', (get_current_user(), notes, version, environment))
+        return cursor.rowcount > 0
+
+
+def reject_approval(version, environment, cli_role=None, conflict_reason=None):
+    """Reject a pending approval."""
+    check_permission("approve", "release-manager", cli_role)
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            UPDATE approvals
+            SET status = 'rejected', approved_by = ?, approved_at = CURRENT_TIMESTAMP, conflict_reason = ?
+            WHERE version = ? AND environment = ? AND status = 'pending'
+        ''', (get_current_user(), conflict_reason, version, environment))
+        return cursor.rowcount > 0
+
+
+def set_release_conflict_reason(release_id, conflict_reason):
+    """Set conflict reason on a release record."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE releases SET conflict_reason = ? WHERE id = ?",
+            (conflict_reason, release_id)
+        )

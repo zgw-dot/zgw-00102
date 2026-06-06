@@ -10,8 +10,12 @@ from ..utils import (
     set_current_version,
     insert_release,
     insert_rollback,
+    get_role,
+    is_environment_locked,
+    get_environment_lock,
     EnvironmentError,
     VersionNotFoundError,
+    EnvironmentLockedError,
     VALID_ENVIRONMENTS,
     compute_diff,
     format_diff,
@@ -28,10 +32,18 @@ def validate_environment(env):
 @click.command()
 @click.argument("environment")
 @click.argument("target_version")
+@click.option("--role", type=click.STRING, default=None, help="User role (developer or release-manager)")
 @click.option("--reason", type=click.STRING, default=None, help="Reason for rollback")
 @click.option("--yes", is_flag=True, help="Skip confirmation prompt")
-def rollback(environment, target_version, reason, yes):
+def rollback(environment, target_version, role, reason, yes):
     """Rollback an environment to a previous version."""
+    try:
+        current_role = get_role(role)
+    except Exception as e:
+        log_error("rollback", e.code, e.message, environment=environment, version=target_version)
+        log_audit("rollback", "failed", environment=environment, version=target_version, error_reason=e.message)
+        raise click.ClickException(e.message)
+
     try:
         validate_environment(environment)
     except EnvironmentError as e:
@@ -39,24 +51,63 @@ def rollback(environment, target_version, reason, yes):
         log_audit("rollback", "failed", environment=environment, version=target_version, error_reason=e.message)
         raise click.ClickException(e.message)
 
+    if is_environment_locked(environment):
+        lock_info = get_environment_lock(environment)
+        err = EnvironmentLockedError(
+            environment,
+            lock_reason=lock_info["lock_reason"],
+            locked_by=lock_info["locked_by"]
+        )
+        log_error("rollback", err.code, err.message, environment=environment, version=target_version)
+        log_audit(
+            "rollback",
+            "failed",
+            environment=environment,
+            version=target_version,
+            error_reason=err.message,
+            details={"conflict_reason": err.message, "role": current_role}
+        )
+        raise click.ClickException(err.message)
+
     current_version = get_current_version(environment)
 
     if not current_version:
         msg = f"Environment {environment} has no current version to rollback from"
         log_error("rollback", "NO_CURRENT_VERSION", msg, environment=environment, version=target_version)
-        log_audit("rollback", "failed", environment=environment, version=target_version, error_reason=msg)
+        log_audit(
+            "rollback",
+            "failed",
+            environment=environment,
+            version=target_version,
+            error_reason=msg,
+            details={"role": current_role}
+        )
         raise click.ClickException(msg)
 
     if current_version == target_version:
         msg = f"Environment {environment} is already at version {target_version}"
         log_error("rollback", "ALREADY_AT_VERSION", msg, environment=environment, version=target_version)
-        log_audit("rollback", "failed", environment=environment, version=target_version, error_reason=msg)
+        log_audit(
+            "rollback",
+            "failed",
+            environment=environment,
+            version=target_version,
+            error_reason=msg,
+            details={"role": current_role}
+        )
         raise click.ClickException(msg)
 
     if not has_successful_release(target_version, environment):
         err = VersionNotFoundError(target_version, environment)
         log_error("rollback", err.code, err.message, environment=environment, version=target_version)
-        log_audit("rollback", "failed", environment=environment, version=target_version, error_reason=err.message)
+        log_audit(
+            "rollback",
+            "failed",
+            environment=environment,
+            version=target_version,
+            error_reason=err.message,
+            details={"role": current_role}
+        )
         raise click.ClickException(err.message)
 
     try:
@@ -135,7 +186,7 @@ def rollback(environment, target_version, reason, yes):
             "success",
             environment=environment,
             version=target_version,
-            details={"from_version": current_version, "reason": reason, **plan_summary}
+            details={"from_version": current_version, "reason": reason, "role": current_role, **plan_summary}
         )
 
     except Exception as e:
@@ -145,7 +196,7 @@ def rollback(environment, target_version, reason, yes):
             str(e),
             environment=environment,
             version=target_version,
-            details={"from_version": current_version, "reason": reason}
+            details={"from_version": current_version, "reason": reason, "conflict_reason": str(e), "role": current_role}
         )
         log_audit(
             "rollback",
@@ -153,6 +204,6 @@ def rollback(environment, target_version, reason, yes):
             environment=environment,
             version=target_version,
             error_reason=str(e),
-            details={"from_version": current_version, "reason": reason}
+            details={"from_version": current_version, "reason": reason, "conflict_reason": str(e), "role": current_role}
         )
         raise click.ClickException(f"Failed to rollback: {e}")

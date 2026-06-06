@@ -9,6 +9,8 @@ from ..utils import (
     get_releases,
     get_rollbacks,
     get_environment_status,
+    get_all_environment_locks,
+    get_pending_approvals,
     EnvironmentError,
     VALID_ENVIRONMENTS,
 )
@@ -35,6 +37,8 @@ def history(env, history_type, limit):
             raise click.ClickException(e.message)
 
     env_status = get_environment_status()
+    locks = get_all_environment_locks()
+    pending_approvals = get_pending_approvals(environment=env)
     audits = get_audit_logs(limit=limit)
     releases = get_releases(environment=env, limit=limit)
     rollbacks = get_rollbacks(environment=env, limit=limit)
@@ -47,13 +51,68 @@ def history(env, history_type, limit):
     click.echo("=" * 80)
     env_table = []
     for env_data in env_status:
+        lock_info = next((l for l in locks if l["environment"] == env_data["name"]), None)
+        lock_status = ""
+        if lock_info:
+            if lock_info["is_locked"] == 1:
+                lock_status = " [LOCKED]"
+            else:
+                lock_status = " [UNLOCKED]"
         env_table.append([
-            env_data["name"],
+            env_data["name"] + lock_status,
             env_data["current_version"] or "None",
             env_data["updated_at"]
         ])
     click.echo(tabulate(env_table, headers=["Environment", "Current Version", "Updated At"], tablefmt="simple"))
     click.echo()
+
+    if history_type in ["all", "audit"]:
+        click.echo("=" * 80)
+        click.echo("ENVIRONMENT LOCK STATUS")
+        click.echo("=" * 80)
+        if locks:
+            lock_table = []
+            for lock_info in locks:
+                status = "LOCKED" if lock_info["is_locked"] == 1 else "UNLOCKED"
+                lock_table.append([
+                    lock_info["environment"],
+                    status,
+                    lock_info["lock_reason"] or "N/A",
+                    lock_info["locked_by"] or "N/A",
+                    lock_info["locked_at"] or "N/A",
+                ])
+            click.echo(tabulate(
+                lock_table,
+                headers=["Environment", "Status", "Reason", "Locked By", "Locked At"],
+                tablefmt="simple"
+            ))
+        else:
+            click.echo("No lock information found.")
+        click.echo()
+
+    if history_type in ["all", "audit"]:
+        click.echo("=" * 80)
+        click.echo("PENDING APPROVALS")
+        click.echo("=" * 80)
+        if pending_approvals:
+            approval_table = []
+            for app in pending_approvals:
+                approval_table.append([
+                    app["id"],
+                    app["version"],
+                    app["environment"],
+                    app["requested_by"],
+                    app["requested_at"],
+                    app.get("notes") or "N/A",
+                ])
+            click.echo(tabulate(
+                approval_table,
+                headers=["ID", "Version", "Env", "Requested By", "Requested At", "Notes"],
+                tablefmt="simple"
+            ))
+        else:
+            click.echo("No pending approvals.")
+        click.echo()
 
     if history_type in ["all", "releases"]:
         click.echo("=" * 80)

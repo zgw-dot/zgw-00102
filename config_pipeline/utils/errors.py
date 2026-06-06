@@ -64,3 +64,91 @@ class PipelineNotInitializedError(PipelineError):
     def __init__(self):
         message = "Pipeline not initialized. Run 'pipeline init' first."
         super().__init__(message, code="NOT_INITIALIZED")
+
+
+class EnvironmentLockedError(PipelineError):
+    """Environment is locked error"""
+    def __init__(self, environment, lock_reason=None, locked_by=None):
+        self.environment = environment
+        self.lock_reason = lock_reason
+        self.locked_by = locked_by
+        reason_part = f" Reason: {lock_reason}" if lock_reason else ""
+        by_part = f" (locked by {locked_by})" if locked_by else ""
+        message = f"Environment '{environment}' is locked.{reason_part}{by_part}"
+        super().__init__(message, code="ENVIRONMENT_LOCKED")
+
+
+class ApprovalRequiredError(PipelineError):
+    """Approval required before release error"""
+    def __init__(self, version, environment):
+        self.version = version
+        self.environment = environment
+        message = f"Version {version} requires approval before releasing to {environment}. Use 'pipeline approve' first."
+        super().__init__(message, code="APPROVAL_REQUIRED")
+
+
+class PermissionDeniedError(PipelineError):
+    """Permission denied error"""
+    def __init__(self, action, required_role, current_role=None):
+        self.action = action
+        self.required_role = required_role
+        self.current_role = current_role
+        role_part = f" Your role: {current_role}" if current_role else ""
+        message = f"Permission denied for '{action}'. Required role: {required_role}.{role_part}"
+        super().__init__(message, code="PERMISSION_DENIED")
+
+
+class InvalidRoleError(PipelineError):
+    """Invalid role error"""
+    def __init__(self, role, valid_roles=None):
+        self.role = role
+        self.valid_roles = valid_roles or ["developer", "release-manager"]
+        message = f"Invalid role '{role}'. Must be one of: {', '.join(self.valid_roles)}"
+        super().__init__(message, code="INVALID_ROLE")
+
+
+class ApprovalNotFoundError(PipelineError):
+    """Approval not found error"""
+    def __init__(self, version, environment):
+        self.version = version
+        self.environment = environment
+        message = f"No pending approval found for version {version} in {environment} environment"
+        super().__init__(message, code="APPROVAL_NOT_FOUND")
+
+
+class AlreadyApprovedError(PipelineError):
+    """Already approved error"""
+    def __init__(self, version, environment):
+        self.version = version
+        self.environment = environment
+        message = f"Version {version} is already approved for {environment} environment"
+        super().__init__(message, code="ALREADY_APPROVED")
+
+
+class PendingApprovalExistsError(PipelineError):
+    """Pending approval already exists error"""
+    def __init__(self, version, environment):
+        self.version = version
+        self.environment = environment
+        message = f"A pending approval already exists for version {version} in {environment} environment"
+        super().__init__(message, code="PENDING_APPROVAL_EXISTS")
+
+
+class EnvironmentNotLockedError(PipelineError):
+    """Environment is not locked error"""
+    def __init__(self, environment):
+        self.environment = environment
+        message = f"Environment '{environment}' is not locked"
+        super().__init__(message, code="ENVIRONMENT_NOT_LOCKED")
+
+
+class AlreadyLockedError(PipelineError):
+    """Environment already locked error"""
+    def __init__(self, environment, lock_reason=None, locked_by=None):
+        self.environment = environment
+        self.lock_reason = lock_reason
+        self.locked_by = locked_by
+        reason_part = f" Reason: {lock_reason}" if lock_reason else ""
+        by_part = f" (locked by {locked_by})" if locked_by else ""
+        message = f"Environment '{environment}' is already locked.{reason_part}{by_part}"
+        super().__init__(message, code="ALREADY_LOCKED")

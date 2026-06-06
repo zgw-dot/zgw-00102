@@ -12,6 +12,13 @@
 - **history**: 查看发布、回滚和审计历史
 - **rollback**: 回滚到指定历史版本
 - **export**: 导出审计数据（JSON/Markdown）
+- **pending**: 标记版本待审批（prod 环境）
+- **approve**: 审批待发布版本（release-manager 角色）
+- **reject**: 拒绝待发布版本（release-manager 角色）
+- **pending-list**: 查看待审批列表
+- **lock**: 锁定环境，禁止发布/回滚（release-manager 角色）
+- **unlock**: 解锁环境（release-manager 角色）
+- **lock-status**: 查看环境锁定状态
 
 ## 核心约束
 
@@ -19,8 +26,23 @@
 - 合法环境: `dev`, `staging`, `prod`
 - 版本在同一环境中不能重复发布
 - 发布到 prod 前必须先在 staging 发布成功
+- **prod 环境需要审批后才能发布**
 - 失败时不会推进当前版本指针
 - 所有操作记录保存在 SQLite 中
+
+## 角色与权限
+
+| 角色 | 权限 |
+|------|------|
+| `developer` | 基本操作（import, validate, plan, apply to dev/staging, pending, history, export） |
+| `release-manager` | 所有 developer 权限 + approve, reject, lock, unlock, apply to prod |
+
+### 设置角色方式
+
+1. **CLI 参数**: `--role release-manager`
+2. **环境变量**: `export PIPELINE_ROLE=release-manager` (Windows: `set PIPELINE_ROLE=release-manager`)
+
+默认角色为 `developer`。
 
 ## 安装
 
@@ -71,20 +93,46 @@ python pipeline.py plan 1.0.0 prod
 python pipeline.py plan 2.0.0 staging
 ```
 
-### 5. 执行发布
+### 5. 审批与发布（Prod 环境）
 ```bash
-# 发布到 staging（跳过确认）
+# 先发布到 staging（必经过渡）
 python pipeline.py apply 1.0.0 staging --yes
+
+# 标记待审批（developer 角色）
+python pipeline.py pending 1.0.0 prod --notes "新功能上线"
+
+# 查看待审批列表
+python pipeline.py pending-list
+
+# 审批通过（release-manager 角色）
+python pipeline.py approve 1.0.0 prod --role release-manager --notes "已验证，同意发布"
 
 # 发布到 prod
 python pipeline.py apply 1.0.0 prod --yes
 
-# 发布 2.0.0 到 staging 和 prod
+# 发布 2.0.0 到 staging
 python pipeline.py apply 2.0.0 staging --yes
-python pipeline.py apply 2.0.0 prod --yes
 ```
 
-### 6. 查看历史
+### 6. 环境锁定与解锁
+```bash
+# 锁定 prod 环境（release-manager 角色）
+python pipeline.py lock prod --role release-manager --reason "紧急维护中"
+
+# 查看锁定状态
+python pipeline.py lock-status
+
+# 尝试发布到被锁定的环境（应该失败）
+python pipeline.py apply 2.0.0 prod --yes
+
+# 解锁环境
+python pipeline.py unlock prod --role release-manager
+
+# 解锁后回滚
+python pipeline.py rollback prod 1.0.0 --reason "回滚到稳定版本" --yes
+```
+
+### 7. 查看历史
 ```bash
 # 查看全部历史
 python pipeline.py history
@@ -160,6 +208,157 @@ python pipeline.py rollback staging 99.99.99 --yes
 # 错误: Version 99.99.99 not found in staging environment
 ```
 
+### 7. 无权限审批（developer 尝试审批）
+```bash
+# 先创建待审批
+python pipeline.py apply 2.0.0 staging --yes
+python pipeline.py pending 2.0.0 prod --notes "待审批"
+
+# 用 developer 角色审批（默认角色，失败）
+python pipeline.py approve 2.0.0 prod --role developer
+# 错误: Permission denied for 'approve'. Required role: release-manager. Your role: developer
+```
+
+### 8. 锁定环境发布冲突
+```bash
+# 锁定环境
+python pipeline.py lock prod --role release-manager --reason "发布冻结"
+
+# 先确保有审批过的版本
+python pipeline.py unlock prod --role release-manager
+python pipeline.py apply 2.0.0 staging --yes
+python pipeline.py pending 2.0.0 prod
+python pipeline.py approve 2.0.0 prod --role release-manager
+python pipeline.py lock prod --role release-manager --reason "发布冻结"
+
+# 尝试发布（失败）
+python pipeline.py apply 2.0.0 prod --yes
+# 错误: Environment 'prod' is locked. Reason: 发布冻结
+```
+
+### 9. 未审批就发布 prod
+```bash
+# 先解锁
+python pipeline.py unlock prod --role release-manager
+
+# 仅 pending 不 approve，尝试发布
+python pipeline.py apply 2.0.0 prod --yes
+# 错误: Version 2.0.0 requires approval before releasing to prod. Use 'pipeline approve' first.
+```
+
+### 10. 无效角色
+```bash
+python pipeline.py approve 2.0.0 prod --role admin
+# 错误: Invalid role 'admin'. Must be one of: developer, release-manager
+```
+
+---
+
+## ✅ 完整验证链路
+
+### 链路 1: 成功审批发布（完整流程）
+```bash
+# 清理环境
+rm -f pipeline.db
+python pipeline.py init
+
+# 导入配置
+python pipeline.py import config_pipeline/examples/config_v1.json
+python pipeline.py import config_pipeline/examples/config_v2.json
+
+# 发布到 staging
+python pipeline.py apply 1.0.0 staging --yes
+
+# 标记待审批
+python pipeline.py pending 1.0.0 prod --notes "新功能上线"
+
+# 查看待审批列表
+python pipeline.py pending-list
+
+# 审批通过
+python pipeline.py approve 1.0.0 prod --role release-manager --notes "已验证"
+
+# 发布到 prod
+python pipeline.py apply 1.0.0 prod --yes
+
+# 验证结果：prod 环境当前版本应为 1.0.0
+python pipeline.py history --type releases
+```
+
+### 链路 2: 无权限审批（权限控制）
+```bash
+# 发布到 staging
+python pipeline.py apply 2.0.0 staging --yes
+
+# 标记待审批
+python pipeline.py pending 2.0.0 prod
+
+# 用 developer 角色审批（失败）
+python pipeline.py approve 2.0.0 prod --role developer
+# 预期错误：Permission denied for 'approve'. Required role: release-manager.
+
+# 用环境变量设置角色后审批（成功）
+$env:PIPELINE_ROLE="release-manager"
+python pipeline.py approve 2.0.0 prod
+```
+
+### 链路 3: 锁定环境发布冲突
+```bash
+# 锁定 prod 环境
+python pipeline.py lock prod --role release-manager --reason "紧急发布冻结"
+
+# 查看锁定状态
+python pipeline.py lock-status
+
+# 尝试发布（失败）
+python pipeline.py apply 2.0.0 prod --yes
+# 预期错误：Environment 'prod' is locked. Reason: 紧急发布冻结
+
+# 查看错误日志
+python pipeline.py history --type audit
+```
+
+### 链路 4: 解锁后回滚
+```bash
+# 先确保 prod 有版本
+python pipeline.py unlock prod --role release-manager
+python pipeline.py apply 2.0.0 prod --yes
+
+# 锁定后尝试回滚（失败）
+python pipeline.py lock prod --role release-manager --reason "维护中"
+python pipeline.py rollback prod 1.0.0 --yes
+# 预期错误：Environment 'prod' is locked.
+
+# 解锁后回滚（成功）
+python pipeline.py unlock prod --role release-manager
+python pipeline.py rollback prod 1.0.0 --reason "回滚到稳定版" --yes
+
+# 验证：prod 已回滚到 1.0.0
+python pipeline.py history --type rollbacks
+```
+
+### 链路 5: 数据持久化验证
+```bash
+# 执行一些操作
+python pipeline.py init
+python pipeline.py import config_pipeline/examples/config_v1.json
+python pipeline.py apply 1.0.0 staging --yes
+python pipeline.py pending 1.0.0 prod
+python pipeline.py lock prod --role release-manager --reason "测试锁定"
+
+# 关闭终端，重新打开
+cd /path/to/project
+
+# 验证历史和状态仍然存在
+python pipeline.py history
+python pipeline.py pending-list
+python pipeline.py lock-status
+
+# 导出审计数据（包含审批人、锁定原因、冲突原因）
+python pipeline.py export --output audit.json --format json
+python pipeline.py export --output audit.md --format markdown
+```
+
 ---
 
 ## 🔄 重启验证命令
@@ -171,23 +370,32 @@ python pipeline.py rollback staging 99.99.99 --yes
 python pipeline.py init
 python pipeline.py import config_pipeline/examples/config_v1.json
 python pipeline.py apply 1.0.0 staging --yes
-python pipeline.py history > /tmp/history_before.txt
+python pipeline.py pending 1.0.0 prod
+python pipeline.py lock prod --role release-manager --reason "测试"
 
 # 第二步：完全退出并重试
 # （模拟重启 - 不需要做任何特殊操作，SQLite 已持久化）
 
 # 第三步：验证历史记录一致
-python pipeline.py history > /tmp/history_after.txt
-diff /tmp/history_before.txt /tmp/history_after.txt
+python pipeline.py history > history_before.txt
+
+# 关闭终端，重新打开
+cd /path/to/project
+
+python pipeline.py history > history_after.txt
+diff history_before.txt history_after.txt
 # 应该没有差异
 ```
 
 或者更简单的验证：
 ```bash
-# 初始发布
+# 初始操作
 python pipeline.py init
 python pipeline.py import config_pipeline/examples/config_v1.json
 python pipeline.py apply 1.0.0 staging --yes
+python pipeline.py pending 1.0.0 prod
+python pipeline.py approve 1.0.0 prod --role release-manager
+python pipeline.py apply 1.0.0 prod --yes
 python pipeline.py history --type releases
 
 # 关闭终端，重新打开
@@ -195,6 +403,8 @@ cd /path/to/project
 
 # 验证历史仍然存在
 python pipeline.py history --type releases
+python pipeline.py pending-list --all
+python pipeline.py lock-status
 ```
 
 ---
@@ -219,7 +429,10 @@ python pipeline.py history --type releases
     │   ├── apply_cmd.py        # apply 命令
     │   ├── history_cmd.py      # history 命令
     │   ├── rollback_cmd.py     # rollback 命令
-    │   └── export_cmd.py       # export 命令
+    │   ├── export_cmd.py       # export 命令
+    │   ├── lock_cmd.py         # lock/unlock/lock-status 命令
+    │   ├── approve_cmd.py      # approve/reject 命令
+    │   └── pending_cmd.py      # pending/pending-list 命令
     ├── utils/
     │   ├── __init__.py
     │   ├── errors.py           # 错误定义
@@ -228,6 +441,7 @@ python pipeline.py history --type releases
     └── examples/
         ├── config_v1.json      # 示例配置 v1
         ├── config_v2.json      # 示例配置 v2
+        ├── config_v3.json      # 示例配置 v3
         └── config_invalid.json # 无效配置（用于测试）
 ```
 
@@ -235,10 +449,12 @@ python pipeline.py history --type releases
 
 - `environments`: 环境信息和当前版本指针
 - `configs`: 导入的配置快照
-- `releases`: 发布记录（成功/失败）
+- `releases`: 发布记录（成功/失败，含审批人、冲突原因）
 - `rollbacks`: 回滚记录
 - `audit_logs`: 所有操作的审计日志
 - `error_logs`: 错误详情记录
+- `environment_locks`: 环境锁定状态（锁定原因、锁定人、冲突原因）
+- `approvals`: 审批记录（待审批/已审批/已拒绝，审批人、冲突原因）
 
 ## 审计导出内容
 
@@ -248,3 +464,6 @@ python pipeline.py history --type releases
 - **时间戳**: 操作执行时间
 - **错误原因**: 失败操作的具体错误信息
 - **环境状态**: 各环境当前版本
+- **审批人**: prod 环境发布的审批人
+- **锁定原因**: 环境锁定的原因说明
+- **冲突失败原因**: 发布/回滚冲突的具体原因

@@ -11,6 +11,8 @@ from ..utils import (
     get_rollbacks,
     get_all_error_logs,
     get_environment_status,
+    get_all_environment_locks,
+    get_all_approvals,
     get_current_user,
     get_current_time,
     EnvironmentError,
@@ -40,6 +42,8 @@ def export(env, output, output_format):
 
     try:
         env_status = get_environment_status()
+        locks = get_all_environment_locks()
+        approvals = get_all_approvals(environment=env, limit=1000)
         audit_logs = get_audit_logs(limit=1000)
         releases = get_releases(environment=env, limit=1000)
         rollbacks = get_rollbacks(environment=env, limit=1000)
@@ -63,15 +67,43 @@ def export(env, output, output_format):
                 "releases": len(releases),
                 "rollbacks": len(rollbacks),
                 "error_logs": len(error_logs),
+                "approvals": len(approvals),
+                "locks": len(locks),
             }
         },
         "environment_status": env_status,
+        "environment_locks": [],
+        "approvals": [],
         "plan_summaries": [],
         "audit_logs": [],
         "releases": [],
         "rollbacks": [],
         "error_logs": [],
     }
+
+    for lock in locks:
+        export_data["environment_locks"].append({
+            "environment": lock["environment"],
+            "is_locked": lock["is_locked"] == 1,
+            "lock_reason": lock["lock_reason"],
+            "locked_by": lock["locked_by"],
+            "locked_at": lock["locked_at"],
+            "conflict_reason": lock.get("conflict_reason"),
+        })
+
+    for app in approvals:
+        export_data["approvals"].append({
+            "id": app["id"],
+            "version": app["version"],
+            "environment": app["environment"],
+            "status": app["status"],
+            "requested_by": app["requested_by"],
+            "requested_at": app["requested_at"],
+            "approved_by": app.get("approved_by"),
+            "approved_at": app.get("approved_at"),
+            "notes": app.get("notes"),
+            "conflict_reason": app.get("conflict_reason"),
+        })
 
     for release in releases:
         try:
@@ -85,7 +117,9 @@ def export(env, output, output_format):
             "environment": release["environment"],
             "status": release["status"],
             "applied_by": release["created_by"],
+            "approved_by": release.get("approved_by"),
             "applied_at": release["created_at"],
+            "conflict_reason": release.get("conflict_reason"),
             "plan_summary": plan_summary,
         })
 
@@ -95,6 +129,8 @@ def export(env, output, output_format):
             "environment": release["environment"],
             "status": release["status"],
             "created_by": release["created_by"],
+            "approved_by": release.get("approved_by"),
+            "conflict_reason": release.get("conflict_reason"),
             "created_at": release["created_at"],
         })
 
@@ -103,6 +139,10 @@ def export(env, output, output_format):
             details = json.loads(audit["details"]) if audit["details"] else None
         except (json.JSONDecodeError, TypeError):
             details = None
+
+        conflict_reason = None
+        if details and isinstance(details, dict):
+            conflict_reason = details.get("conflict_reason")
 
         export_data["audit_logs"].append({
             "id": audit["id"],
@@ -114,6 +154,7 @@ def export(env, output, output_format):
             "timestamp": audit["created_at"],
             "details": details,
             "error_reason": audit["error_reason"],
+            "conflict_reason": conflict_reason,
         })
 
     for rb in rollbacks:
@@ -186,23 +227,51 @@ def _format_markdown(data):
         lines.append(f"| {env['name']} | {env['current_version'] or 'None'} | {env['updated_at']} |")
     lines.append("")
     
+    lines.append("## Environment Lock Status")
+    lines.append("")
+    lines.append("| Environment | Status | Lock Reason | Locked By | Locked At | Conflict Reason |")
+    lines.append("|-------------|--------|-------------|-----------|-----------|-----------------|")
+    for lock in data["environment_locks"]:
+        status = "LOCKED" if lock["is_locked"] else "UNLOCKED"
+        reason = lock.get("lock_reason") or "N/A"
+        locked_by = lock.get("locked_by") or "N/A"
+        locked_at = lock.get("locked_at") or "N/A"
+        conflict = lock.get("conflict_reason") or "N/A"
+        lines.append(f"| {lock['environment']} | {status} | {reason} | {locked_by} | {locked_at} | {conflict} |")
+    lines.append("")
+    
+    if data["approvals"]:
+        lines.append("## Approvals")
+        lines.append("")
+        lines.append("| ID | Version | Env | Status | Requested By | Requested At | Approved By | Approved At | Conflict Reason |")
+        lines.append("|----|---------|-----|--------|--------------|--------------|-------------|-------------|-----------------|")
+        for app in data["approvals"]:
+            approved_by = app.get("approved_by") or "N/A"
+            approved_at = app.get("approved_at") or "N/A"
+            conflict = app.get("conflict_reason") or "N/A"
+            lines.append(f"| {app['id']} | {app['version']} | {app['environment']} | {app['status']} | {app['requested_by']} | {app['requested_at']} | {approved_by} | {approved_at} | {conflict} |")
+        lines.append("")
+    
     lines.append("## Deployment Plan Summaries")
     lines.append("")
-    lines.append("| ID | Version | Env | Status | Operator | Applied At | Changes |")
-    lines.append("|----|---------|-----|--------|----------|------------|---------|")
+    lines.append("| ID | Version | Env | Status | Operator | Approved By | Applied At | Changes | Conflict Reason |")
+    lines.append("|----|---------|-----|--------|----------|-------------|------------|---------|-----------------|")
     for plan in data["plan_summaries"]:
         summary = plan["plan_summary"]
         changes = f"+{summary.get('added_count', 0)} -{summary.get('removed_count', 0)} ~{summary.get('modified_count', 0)}"
-        lines.append(f"| {plan['release_id']} | {plan['version']} | {plan['environment']} | {plan['status']} | {plan['applied_by']} | {plan['applied_at']} | {changes} |")
+        approved_by = plan.get("approved_by") or "N/A"
+        conflict = plan.get("conflict_reason") or "N/A"
+        lines.append(f"| {plan['release_id']} | {plan['version']} | {plan['environment']} | {plan['status']} | {plan['applied_by']} | {approved_by} | {plan['applied_at']} | {changes} | {conflict} |")
     lines.append("")
     
     lines.append("## Audit Log")
     lines.append("")
-    lines.append("| ID | Action | Env | Version | Status | Operator | Timestamp | Error Reason |")
-    lines.append("|----|--------|-----|---------|--------|----------|-----------|--------------|")
+    lines.append("| ID | Action | Env | Version | Status | Operator | Timestamp | Error Reason | Conflict Reason |")
+    lines.append("|----|--------|-----|---------|--------|----------|-----------|--------------|-----------------|")
     for audit in data["audit_logs"]:
         error = audit.get("error_reason") or ""
-        lines.append(f"| {audit['id']} | {audit['action']} | {audit['environment'] or 'N/A'} | {audit['version'] or 'N/A'} | {audit['status']} | {audit['operator']} | {audit['timestamp']} | {error} |")
+        conflict = audit.get("conflict_reason") or "N/A"
+        lines.append(f"| {audit['id']} | {audit['action']} | {audit['environment'] or 'N/A'} | {audit['version'] or 'N/A'} | {audit['status']} | {audit['operator']} | {audit['timestamp']} | {error} | {conflict} |")
     lines.append("")
     
     if data["error_logs"]:
