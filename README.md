@@ -19,6 +19,8 @@
 - **lock**: 锁定环境，禁止发布/回滚（release-manager 角色）
 - **unlock**: 解锁环境（release-manager 角色）
 - **lock-status**: 查看环境锁定状态
+- **preview**: 发布预演，在 apply 前查看变更、审批要求、锁定状态
+- **preview show**: 查看历史预演结果（支持跨重启）
 
 ## 核心约束
 
@@ -94,7 +96,26 @@ python pipeline.py plan 1.0.0 prod
 python pipeline.py plan 2.0.0 staging
 ```
 
-### 5. 审批与发布（Prod 环境）
+### 5. 发布预演（Preview）
+```bash
+# 预演发布 2.0.0 到 dev
+python pipeline.py preview run 2.0.0 dev
+
+# 查看最近一次预演
+python pipeline.py preview show 2.0.0 dev
+
+# 查看所有预演记录
+python pipeline.py preview show --all
+
+# 基于预演发布（自动检查漂移）
+python pipeline.py apply --from-preview 2.0.0 dev --yes
+
+# 预演后如果状态变化（配置被修改、环境指针变化、锁定状态变化），会检测到漂移
+# 使用 --ack-drift 确认漂移后继续（遵循权限规则）
+python pipeline.py apply --from-preview 2.0.0 dev --yes --ack-drift
+```
+
+### 6. 审批与发布（Prod 环境）
 ```bash
 # 先发布到 staging（必经过渡）
 python pipeline.py apply 1.0.0 staging --yes
@@ -115,7 +136,7 @@ python pipeline.py apply 1.0.0 prod --role release-manager --yes
 python pipeline.py apply 2.0.0 staging --yes
 ```
 
-### 6. 环境锁定与解锁
+### 7. 环境锁定与解锁
 ```bash
 # 锁定 prod 环境（release-manager 角色）
 python pipeline.py lock prod --role release-manager --reason "紧急维护中"
@@ -133,7 +154,7 @@ python pipeline.py unlock prod --role release-manager
 python pipeline.py rollback prod 1.0.0 --reason "回滚到稳定版本" --yes
 ```
 
-### 7. 查看历史
+### 8. 查看历史
 ```bash
 # 查看全部历史
 python pipeline.py history
@@ -145,13 +166,13 @@ python pipeline.py history --env staging
 python pipeline.py history --type releases
 ```
 
-### 7. 回滚
+### 9. 回滚
 ```bash
 # 回滚 staging 到 1.0.0
 python pipeline.py rollback staging 1.0.0 --reason "feature rollback" --yes
 ```
 
-### 8. 导出审计数据
+### 10. 导出审计数据
 ```bash
 # 导出为 JSON
 python pipeline.py export --output audit.json --format json
@@ -276,6 +297,36 @@ python pipeline.py export --status invalid
 ```bash
 python pipeline.py export --since not-a-date
 # 错误: Invalid --since format 'not-a-date'. Expected YYYY-MM-DD or ISO datetime (e.g., 2024-01-01 or 2024-01-01T12:00:00)
+```
+
+### 13. 预演后配置内容漂移
+```bash
+# 先创建预演
+python pipeline.py preview run 2.0.0 dev
+
+# 直接修改 SQLite 中同版本配置内容（模拟配置被篡改）
+# (通过 UPDATE configs SET config_json = '...' WHERE version = '2.0.0'
+
+# 尝试基于预演发布（预期失败 - 配置内容已漂移）
+python pipeline.py apply --from-preview 2.0.0 dev --yes
+# 错误: Preview drift detected. State has changed since preview:
+#   - Target config '2.0.0' content changed: app_name: myapp -> myapp_modified, ...
+```
+
+### 14. developer 不能绕过 prod 配置漂移
+```bash
+# 先发布到 staging
+python pipeline.py apply 2.0.0 staging --yes
+
+# 创建 prod 预演
+python pipeline.py preview run 2.0.0 prod --role release-manager
+
+# 修改配置内容
+# UPDATE configs SET config_json = '...' WHERE version = '2.0.0'
+
+# developer 尝试确认漂移（预期失败）
+python pipeline.py apply --from-preview 2.0.0 prod --yes --ack-drift --role developer
+# 错误: Cannot acknowledge drift: developer cannot acknowledge drift in prod environment
 ```
 
 ---
@@ -445,6 +496,63 @@ python pipeline.py export --output regression_test.json --format json
 # 预期导出包含所有字段
 ```
 
+### 链路 8: 配置内容漂移检测与处理（目标配置漂移修复验证）
+```bash
+# 初始化环境
+python pipeline.py init
+python pipeline.py import config_pipeline/examples/config_v1.json
+python pipeline.py import config_pipeline/examples/config_v2.json
+
+# 先发布一个基准版本
+python pipeline.py apply 1.0.0 dev --yes
+
+# 创建预演
+python pipeline.py preview run 2.0.0 dev
+# 预期：显示 15 个变更，预演已保存
+
+# 查看预演结果
+python pipeline.py preview show 2.0.0 dev
+# 预期：显示预演详情，包括 SNAPSHOT STATE 和 CHANGES SUMMARY
+
+# 直接修改 SQLite 中同版本配置（模拟配置被篡改）
+# 可以使用如下 Python 脚本：
+#   import sqlite3, json
+#   conn = sqlite3.connect('pipeline.db')
+#   cursor = conn.cursor()
+#   cursor.execute("SELECT config_json FROM configs WHERE version = '2.0.0'")
+#   config = json.loads(cursor.fetchone()[0])
+#   config['database']['pool_size'] = 999
+#   config['app_name'] = 'myapp_drifted'
+#   cursor.execute("UPDATE configs SET config_json = ? WHERE version = '2.0.0'",
+#                  (json.dumps(config),))
+#   conn.commit()
+#   conn.close()
+
+# 测试 1: 尝试基于预演发布（不确认漂移）- 预期失败
+python pipeline.py apply --from-preview 2.0.0 dev --yes
+# 预期错误：Preview drift detected. State has changed since preview:
+#   - Target config '2.0.0' content changed: app_name: myapp -> myapp_drifted, database.pool_size: 20 -> 999
+
+# 验证：环境指针和 release 内容未变
+python pipeline.py history --type releases
+# 预期：只有 1.0.0 -> dev，没有 2.0.0 的记录
+
+# 验证：audit_logs 记录了 drift_detected
+python pipeline.py history --type audit | Select-String -Pattern "drift_detected"
+# 预期：存在 drift_detected 记录
+
+# 测试 2: 使用 --ack-drift 确认漂移后发布 - 预期成功（非 prod，非锁定变更）
+python pipeline.py apply --from-preview 2.0.0 dev --yes --ack-drift
+# 预期：! DRIFT DETECTED but acknowledged:
+#   ! Target config '2.0.0' content changed: ...
+#   Proceeding with apply (acknowledged by developer)
+#   SUCCESS: Version 2.0.0 applied to dev
+
+# 验证：漂移后的配置已正确发布
+python pipeline.py export --output drift_verify.json --format json
+# 预期：release 中的配置包含 pool_size=999 和 app_name=myapp_drifted
+```
+
 ---
 
 ## 🔄 重启验证命令
@@ -518,7 +626,8 @@ python pipeline.py lock-status
     │   ├── export_cmd.py       # export 命令
     │   ├── lock_cmd.py         # lock/unlock/lock-status 命令
     │   ├── approve_cmd.py      # approve/reject 命令
-    │   └── pending_cmd.py      # pending/pending-list 命令
+    │   ├── pending_cmd.py      # pending/pending-list 命令
+    │   └── preview_cmd.py      # preview/preview show 命令（发布预演和漂移检查）
     ├── utils/
     │   ├── __init__.py
     │   ├── errors.py           # 错误定义
@@ -541,6 +650,7 @@ python pipeline.py lock-status
 - `error_logs`: 错误详情记录
 - `environment_locks`: 环境锁定状态（锁定原因、锁定人、冲突原因）
 - `approvals`: 审批记录（待审批/已审批/已拒绝，审批人、冲突原因）
+- `previews`: 发布预演记录（包含目标配置快照、环境指针快照、锁状态快照、审批状态快照、变更摘要）
 
 ## 审计导出内容
 

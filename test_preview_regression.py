@@ -353,26 +353,26 @@ def test_audit_logging_coverage():
     logs = get_audit_logs()
     preview_success = [l for l in logs if l[0] == 'preview' and l[1] == 'success']
     assert len(preview_success) == 1, "Expected preview success log"
-    print("  ✓ preview success logged")
+    print("  OK preview success logged")
 
     run_cmd(['preview', 'show', '1.0.0', 'dev'])
     logs = get_audit_logs()
     preview_show_success = [l for l in logs if l[0] == 'preview_show' and l[1] == 'success']
     assert len(preview_show_success) == 1, "Expected preview_show success log"
-    print("  ✓ preview_show success logged")
+    print("  OK preview_show success logged")
 
     run_cmd(['preview', 'run', '999.0.0', 'dev'], expect_success=False)
     logs = get_audit_logs()
     preview_failed = [l for l in logs if l[0] == 'preview' and l[1] == 'failed']
     assert len(preview_failed) == 1, "Expected preview failed log"
     assert 'not found' in preview_failed[0][2]
-    print("  ✓ preview failure logged")
+    print("  OK preview failure logged")
 
     run_cmd(['preview', 'show', '999.0.0', 'dev'], expect_success=False)
     logs = get_audit_logs()
     preview_show_failed = [l for l in logs if l[0] == 'preview_show' and l[1] == 'failed']
     assert len(preview_show_failed) == 1, "Expected preview_show failed log"
-    print("  ✓ preview_show failure logged")
+    print("  OK preview_show failure logged")
 
     run_cmd(['preview', 'run', '2.0.0', 'dev'])
     run_cmd(['apply', '1.0.0', 'staging', '--yes'])
@@ -380,7 +380,7 @@ def test_audit_logging_coverage():
     logs = get_audit_logs()
     drift_detected = [l for l in logs if l[0] == 'apply' and l[1] == 'drift_detected']
     assert len(drift_detected) == 1, "Expected drift_detected log"
-    print("  ✓ drift_detected logged")
+    print("  OK drift_detected logged")
 
     run_cmd(['apply', '--from-preview', '2.0.0', 'dev', '--yes', '--ack-drift'])
     logs = get_audit_logs()
@@ -388,7 +388,7 @@ def test_audit_logging_coverage():
     assert len(drift_acknowledged) == 1, "Expected drift_acknowledged log"
     apply_success = [l for l in logs if l[0] == 'apply' and l[1] == 'success']
     assert len(apply_success) >= 1, "Expected apply success log"
-    print("  ✓ drift_acknowledged and apply success logged")
+    print("  OK drift_acknowledged and apply success logged")
 
     expected_actions = {'preview', 'preview_show', 'apply'}
     actual_actions = {l[0] for l in logs}
@@ -398,8 +398,8 @@ def test_audit_logging_coverage():
     actual_statuses = {l[1] for l in logs}
     assert expected_statuses.issubset(actual_statuses), f"Missing statuses: {expected_statuses - actual_statuses}"
 
-    print(f"  All expected actions logged: {sorted(expected_actions)}")
-    print(f"  All expected statuses logged: {sorted(expected_statuses)}")
+    print(f"  OK All expected actions logged: {sorted(expected_actions)}")
+    print(f"  OK All expected statuses logged: {sorted(expected_statuses)}")
     print("  [OK] PASSED: Audit logging coverage is complete")
 
 
@@ -495,6 +495,103 @@ def test_preview_show_all():
     print("  [OK] PASSED: preview show --all works correctly")
 
 
+def _modify_config_in_db(version, key_path, new_value):
+    """Directly modify config in SQLite to cause config drift."""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT config_json FROM configs WHERE version = ?", (version,))
+    row = cursor.fetchone()
+    config = json.loads(row[0])
+    keys = key_path.split('.')
+    d = config
+    for k in keys[:-1]:
+        d = d[k]
+    d[keys[-1]] = new_value
+    cursor.execute(
+        "UPDATE configs SET config_json = ? WHERE version = ?",
+        (json.dumps(config), version)
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_target_config_content_drift():
+    """Test 8: Target config content drift detection and handling."""
+    print("\n" + "=" * 60)
+    print("TEST 8: Target config content drift detection")
+    print("=" * 60)
+
+    cleanup()
+    init_db_with_configs()
+
+    run_cmd(['apply', '1.0.0', 'dev', '--yes'])
+    print("  Applied 1.0.0 to dev as baseline")
+
+    run_cmd(['preview', 'run', '2.0.0', 'dev'])
+    print("  Preview created for 2.0.0 -> dev")
+
+    state_before = get_db_state()
+    assert state_before['environments']['dev'] == '1.0.0'
+
+    _modify_config_in_db('2.0.0', 'database.pool_size', 999)
+    _modify_config_in_db('2.0.0', 'features.new_drift_key', True)
+    _modify_config_in_db('2.0.0', 'app_name', 'myapp_modified')
+    print("  Modified config 2.0.0 directly in SQLite (3 changes)")
+
+    result = run_cmd(['apply', '--from-preview', '2.0.0', 'dev', '--yes'], expect_success=False)
+    assert 'Preview drift detected' in result.stderr
+    assert 'content changed' in result.stderr
+    assert 'database.pool_size' in result.stderr
+    assert 'app_name' in result.stderr
+    print("  Config drift correctly detected and rejected")
+
+    state_after_failed = get_db_state()
+    assert state_after_failed['environments']['dev'] == '1.0.0', "Environment pointer must not change"
+    assert len([r for r in state_after_failed['releases'] if r[0] == '2.0.0']) == 0, "No 2.0.0 release"
+    assert len(state_after_failed['previews']) == 1, "Preview should still exist"
+    print("  State unchanged after drift rejection:")
+    print(f"    Environment pointer: {state_after_failed['environments']['dev']}")
+    print(f"    Releases for 2.0.0: none")
+    print(f"    Previews: {len(state_after_failed['previews'])}")
+
+    logs = get_audit_logs()
+    drift_logs = [l for l in logs if l[0] == 'apply' and l[1] == 'drift_detected' and 'content changed' in (l[2] or '')]
+    assert len(drift_logs) == 1, "Expected drift_detected audit log with config drift"
+    print("  drift_detected audit log recorded with config drift reason")
+
+    result_ack = run_cmd(['apply', '--from-preview', '2.0.0', 'dev', '--yes', '--ack-drift'])
+    assert 'DRIFT DETECTED but acknowledged' in result_ack.stdout
+    assert 'content changed' in result_ack.stdout
+    assert 'SUCCESS' in result_ack.stdout
+    print("  Config drift acknowledged and applied successfully")
+
+    state_after_success = get_db_state()
+    assert state_after_success['environments']['dev'] == '2.0.0', "Environment pointer updated"
+    assert len([r for r in state_after_success['releases'] if r[0] == '2.0.0' and r[1] == 'dev']) == 1, "2.0.0 released to dev"
+    print("  State correctly updated after drift acknowledgment:")
+    print(f"    Environment pointer: {state_after_success['environments']['dev']}")
+    print(f"    Releases: 2.0.0 -> dev")
+
+    logs = get_audit_logs()
+    ack_logs = [l for l in logs if l[0] == 'apply' and l[1] == 'drift_acknowledged']
+    success_logs = [l for l in logs if l[0] == 'apply' and l[1] == 'success']
+    assert len(ack_logs) >= 1, "Expected drift_acknowledged audit log"
+    assert len(success_logs) >= 1, "Expected apply success audit log"
+    print("  drift_acknowledged and success audit logs recorded")
+
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT config_json FROM releases WHERE version = '2.0.0' AND environment = 'dev'")
+    released_config = json.loads(cursor.fetchone()[0])
+    assert released_config['database']['pool_size'] == 999, "Drifted value should be in release"
+    assert released_config['features']['new_drift_key'] == True, "Drifted value should be in release"
+    assert released_config['app_name'] == 'myapp_modified', "Drifted value should be in release"
+    conn.close()
+    print("  Drifted config values correctly persisted in release")
+
+    print("  [OK] PASSED: Target config content drift detection works correctly")
+
+
 def main():
     print("=" * 60)
     print("PREVIEW AND DRIFT CHECK REGRESSION TESTS")
@@ -508,6 +605,7 @@ def main():
         test_audit_logging_coverage()
         test_preview_does_not_modify_release_state()
         test_preview_show_all()
+        test_target_config_content_drift()
 
         print("\n" + "=" * 60)
         print("ALL TESTS PASSED!")

@@ -939,6 +939,33 @@ def _row_to_preview_dict(row):
     }
 
 
+def _deep_diff_configs(config1, config2, prefix=""):
+    """Recursively compare two config dicts and return list of differences."""
+    diffs = []
+    if config1 is None or config2 is None:
+        if config1 != config2:
+            diffs.append(f"{prefix}: {config1} -> {config2}")
+        return diffs
+
+    if isinstance(config1, dict) and isinstance(config2, dict):
+        all_keys = set(config1.keys()) | set(config2.keys())
+        for key in sorted(all_keys):
+            new_prefix = f"{prefix}.{key}" if prefix else key
+            if key not in config1:
+                diffs.append(f"{new_prefix}: added -> {config2[key]}")
+            elif key not in config2:
+                diffs.append(f"{new_prefix}: {config1[key]} -> removed")
+            else:
+                diffs.extend(_deep_diff_configs(config1[key], config2[key], new_prefix))
+    elif isinstance(config1, list) and isinstance(config2, list):
+        if json.dumps(config1, sort_keys=True) != json.dumps(config2, sort_keys=True):
+            diffs.append(f"{prefix}: list content changed")
+    else:
+        if config1 != config2:
+            diffs.append(f"{prefix}: {config1} -> {config2}")
+    return diffs
+
+
 def check_preview_drift(preview):
     """Check if the preview has drifted from current state.
     
@@ -969,6 +996,18 @@ def check_preview_drift(preview):
         drift_reasons.append(
             f"Target version '{preview['version']}' no longer exists in configs"
         )
+    else:
+        # Check if target config content has changed
+        current_config_data = get_config(preview["version"])
+        current_config = json.loads(current_config_data["config_json"])
+        snapshot_config = preview["target_config"]
+
+        config_diffs = _deep_diff_configs(snapshot_config, current_config)
+        if config_diffs:
+            drift_reasons.append(
+                f"Target config '{preview['version']}' content changed: {', '.join(config_diffs[:3])}"
+                + ("..." if len(config_diffs) > 3 else "")
+            )
 
     return drift_reasons
 
