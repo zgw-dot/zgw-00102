@@ -1,0 +1,39 @@
+{
+  "app_name": "myapp",
+  "version": "2.0.0",
+  "features": {
+    "auth": true,
+    "notifications": true,
+    "dark_mode": true,
+    "analytics": true
+  },
+  "database": {
+    "host": "db.example.com",
+    "port": 5432,
+    "name": "myapp_prod",
+    "pool_size": 20,
+    "timeout": 30
+  },
+  "api_endpoints": [
+    {
+      "path": "/api/v1/users",
+      "method": "GET",
+      "rate_limit": 200
+    },
+    {
+      "path": "/api/v1/orders",
+      "method": "POST",
+      "rate_limit": 100
+    },
+    {
+      "path": "/api/v2/analytics",
+      "method": "GET",
+      "rate_limit": 50
+    }
+  ],
+  "metadata": {
+    "description": "Updated configuration with analytics feature",
+    "team": "platform",
+    "release_date": "2026-06-01"
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "app_name": "myapp",
+  "version": "1.0.0",
+  "features": {
+    "auth": true,
+    "notifications": true,
+    "dark_mode": false
+  },
+  "database": {
+    "host": "localhost",
+    "port": 5432,
+    "name": "myapp_dev",
+    "pool_size": 10
+  },
+  "api_endpoints": [
+    {
+      "path": "/api/v1/users",
+      "method": "GET",
+      "rate_limit": 100
+    },
+    {
+      "path": "/api/v1/orders",
+      "method": "POST",
+      "rate_limit": 50
+    }
+  ],
+  "metadata": {
+    "description": "Initial configuration for myapp",
+    "team": "platform"
+  }
+}

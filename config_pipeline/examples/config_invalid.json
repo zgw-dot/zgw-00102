@@ -1,0 +1,7 @@
+{
+  "app_name": "myapp",
+  "version": "invalid.1",
+  "features": {
+    "auth": true
+  }
+}

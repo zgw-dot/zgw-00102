@@ -1,0 +1,66 @@
+class PipelineError(Exception):
+    """Base class for pipeline errors"""
+    def __init__(self, message, code=None):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+class ValidationError(PipelineError):
+    """Configuration validation error"""
+    def __init__(self, message, missing_keys=None, invalid_keys=None):
+        super().__init__(message, code="VALIDATION_ERROR")
+        self.missing_keys = missing_keys or []
+        self.invalid_keys = invalid_keys or []
+
+
+class EnvironmentError(PipelineError):
+    """Invalid environment error"""
+    def __init__(self, env, valid_envs=None):
+        self.env = env
+        self.valid_envs = valid_envs or ["dev", "staging", "prod"]
+        message = f"Invalid environment '{env}'. Must be one of: {', '.join(self.valid_envs)}"
+        super().__init__(message, code="INVALID_ENVIRONMENT")
+
+
+class DuplicateVersionError(PipelineError):
+    """Duplicate version error"""
+    def __init__(self, version, env):
+        self.version = version
+        self.env = env
+        message = f"Version {version} already exists in {env} environment"
+        super().__init__(message, code="DUPLICATE_VERSION")
+
+
+class StagingRequiredError(PipelineError):
+    """Staging deployment required before prod error"""
+    def __init__(self, version):
+        self.version = version
+        message = f"Version {version} must be deployed to staging before prod"
+        super().__init__(message, code="STAGING_REQUIRED")
+
+
+class VersionNotFoundError(PipelineError):
+    """Version not found error"""
+    def __init__(self, version, env=None):
+        self.version = version
+        self.env = env
+        if env:
+            message = f"Version {version} not found in {env} environment"
+        else:
+            message = f"Version {version} not found"
+        super().__init__(message, code="VERSION_NOT_FOUND")
+
+
+class NoChangesError(PipelineError):
+    """No changes detected in plan"""
+    def __init__(self):
+        message = "No changes detected between current and target configuration"
+        super().__init__(message, code="NO_CHANGES")
+
+
+class PipelineNotInitializedError(PipelineError):
+    """Pipeline not initialized error"""
+    def __init__(self):
+        message = "Pipeline not initialized. Run 'pipeline init' first."
+        super().__init__(message, code="NOT_INITIALIZED")
