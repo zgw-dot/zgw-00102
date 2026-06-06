@@ -27,6 +27,7 @@
 - 版本在同一环境中不能重复发布
 - 发布到 prod 前必须先在 staging 发布成功
 - **prod 环境需要审批后才能发布**
+- **发布到 prod 需要 release-manager 角色**
 - 失败时不会推进当前版本指针
 - 所有操作记录保存在 SQLite 中
 
@@ -107,8 +108,8 @@ python pipeline.py pending-list
 # 审批通过（release-manager 角色）
 python pipeline.py approve 1.0.0 prod --role release-manager --notes "已验证，同意发布"
 
-# 发布到 prod
-python pipeline.py apply 1.0.0 prod --yes
+# 发布到 prod（需要 release-manager 角色）
+python pipeline.py apply 1.0.0 prod --role release-manager --yes
 
 # 发布 2.0.0 到 staging
 python pipeline.py apply 2.0.0 staging --yes
@@ -278,8 +279,8 @@ python pipeline.py pending-list
 # 审批通过
 python pipeline.py approve 1.0.0 prod --role release-manager --notes "已验证"
 
-# 发布到 prod
-python pipeline.py apply 1.0.0 prod --yes
+# 发布到 prod（需要 release-manager 角色）
+python pipeline.py apply 1.0.0 prod --role release-manager --yes
 
 # 验证结果：prod 环境当前版本应为 1.0.0
 python pipeline.py history --type releases
@@ -322,7 +323,7 @@ python pipeline.py history --type audit
 ```bash
 # 先确保 prod 有版本
 python pipeline.py unlock prod --role release-manager
-python pipeline.py apply 2.0.0 prod --yes
+python pipeline.py apply 2.0.0 prod --role release-manager --yes
 
 # 锁定后尝试回滚（失败）
 python pipeline.py lock prod --role release-manager --reason "维护中"
@@ -357,6 +358,66 @@ python pipeline.py lock-status
 # 导出审计数据（包含审批人、锁定原因、冲突原因）
 python pipeline.py export --output audit.json --format json
 python pipeline.py export --output audit.md --format markdown
+```
+
+### 链路 6: prod 发布权限验证（修复权限绕过）
+```bash
+# 初始化环境
+python pipeline.py init
+python pipeline.py import config_pipeline/examples/config_v1.json
+python pipeline.py apply 1.0.0 staging --yes
+python pipeline.py pending 1.0.0 prod
+python pipeline.py approve 1.0.0 prod --role release-manager
+
+# 测试 1: 未传角色（默认 developer）发布 prod - 预期失败
+python pipeline.py apply 1.0.0 prod --yes
+# 预期错误：Permission denied for 'apply'. Required role: release-manager. Your role: developer
+
+# 测试 2: 显式传 developer 角色发布 prod - 预期失败
+python pipeline.py apply 1.0.0 prod --role developer --yes
+# 预期错误：Permission denied for 'apply'. Required role: release-manager. Your role: developer
+
+# 测试 3: 环境变量 PIPELINE_ROLE=developer 发布 prod - 预期失败
+$env:PIPELINE_ROLE="developer"
+python pipeline.py apply 1.0.0 prod --yes
+# 预期错误：Permission denied for 'apply'. Required role: release-manager. Your role: developer
+
+# 测试 4: release-manager 角色发布 prod - 预期成功
+$env:PIPELINE_ROLE="release-manager"
+python pipeline.py apply 1.0.0 prod --yes
+# 预期成功
+
+# 清除环境变量
+Remove-Item Env:PIPELINE_ROLE -ErrorAction SilentlyContinue
+```
+
+### 链路 7: 回归验证（其他功能不受影响）
+```bash
+# 初始化环境
+python pipeline.py init
+python pipeline.py import config_pipeline/examples/config_v1.json
+python pipeline.py import config_pipeline/examples/config_v2.json
+
+# 测试 1: staging apply 不需要 release-manager - 预期成功（默认 developer）
+python pipeline.py apply 1.0.0 staging --yes
+
+# 测试 2: 锁定冲突正常工作
+python pipeline.py lock prod --role release-manager --reason "测试锁定"
+python pipeline.py apply 1.0.0 staging --yes  # staging 不受 prod 锁定影响
+# 预期成功
+
+# 测试 3: pending-list 正常工作
+python pipeline.py pending 2.0.0 prod
+python pipeline.py pending-list
+# 预期显示 pending 状态
+
+# 测试 4: history 正常工作
+python pipeline.py history
+# 预期显示完整历史
+
+# 测试 5: export 正常工作
+python pipeline.py export --output regression_test.json --format json
+# 预期导出包含所有字段
 ```
 
 ---
@@ -395,7 +456,7 @@ python pipeline.py import config_pipeline/examples/config_v1.json
 python pipeline.py apply 1.0.0 staging --yes
 python pipeline.py pending 1.0.0 prod
 python pipeline.py approve 1.0.0 prod --role release-manager
-python pipeline.py apply 1.0.0 prod --yes
+python pipeline.py apply 1.0.0 prod --role release-manager --yes
 python pipeline.py history --type releases
 
 # 关闭终端，重新打开

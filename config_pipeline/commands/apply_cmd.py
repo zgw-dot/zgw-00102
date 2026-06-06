@@ -12,6 +12,7 @@ from ..utils import (
     set_current_version,
     insert_release,
     get_role,
+    check_permission,
     is_environment_locked,
     get_environment_lock,
     is_approved,
@@ -23,6 +24,7 @@ from ..utils import (
     NoChangesError,
     EnvironmentLockedError,
     ApprovalRequiredError,
+    PermissionDeniedError,
     VALID_ENVIRONMENTS,
     compute_diff,
     has_changes,
@@ -50,6 +52,7 @@ def pre_apply_checks(version, environment, cli_role=None):
     if environment == "prod":
         if not has_successful_release(version, "staging"):
             raise StagingRequiredError(version)
+        check_permission("apply", "release-manager", cli_role)
 
     if is_environment_locked(environment):
         lock_info = get_environment_lock(environment)
@@ -79,7 +82,7 @@ def apply(version, environment, role, yes):
 
     try:
         pre_apply_checks(version, environment, cli_role=role)
-    except (EnvironmentError, VersionNotFoundError, DuplicateVersionError, StagingRequiredError, EnvironmentLockedError, ApprovalRequiredError) as e:
+    except (EnvironmentError, VersionNotFoundError, DuplicateVersionError, StagingRequiredError, EnvironmentLockedError, ApprovalRequiredError, PermissionDeniedError) as e:
         log_error("apply", e.code, e.message, environment=environment, version=version)
         log_audit(
             "apply",

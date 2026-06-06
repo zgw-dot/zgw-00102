@@ -1,0 +1,434 @@
+{
+  "export_metadata": {
+    "exported_at": "2026-06-06T12:31:17.910314",
+    "exported_by": "13623",
+    "environment_filter": null,
+    "record_counts": {
+      "audit_logs": 13,
+      "releases": 2,
+      "rollbacks": 0,
+      "error_logs": 2,
+      "approvals": 2,
+      "locks": 3
+    }
+  },
+  "environment_status": [
+    {
+      "id": 1,
+      "name": "dev",
+      "current_version": null,
+      "created_at": "2026-06-06 04:30:45",
+      "updated_at": "2026-06-06 04:30:45"
+    },
+    {
+      "id": 3,
+      "name": "prod",
+      "current_version": null,
+      "created_at": "2026-06-06 04:30:45",
+      "updated_at": "2026-06-06 04:30:45"
+    },
+    {
+      "id": 2,
+      "name": "staging",
+      "current_version": "2.0.0",
+      "created_at": "2026-06-06 04:30:45",
+      "updated_at": "2026-06-06 04:30:47"
+    }
+  ],
+  "environment_locks": [
+    {
+      "environment": "dev",
+      "is_locked": false,
+      "lock_reason": null,
+      "locked_by": null,
+      "locked_at": null,
+      "conflict_reason": null
+    },
+    {
+      "environment": "prod",
+      "is_locked": true,
+      "lock_reason": "回归测试锁定",
+      "locked_by": "13623",
+      "locked_at": "2026-06-06 04:30:46",
+      "conflict_reason": null
+    },
+    {
+      "environment": "staging",
+      "is_locked": false,
+      "lock_reason": null,
+      "locked_by": null,
+      "locked_at": null,
+      "conflict_reason": null
+    }
+  ],
+  "approvals": [
+    {
+      "id": 2,
+      "version": "1.0.0",
+      "environment": "prod",
+      "status": "approved",
+      "requested_by": "13623",
+      "requested_at": "2026-06-06 04:31:16",
+      "approved_by": "13623",
+      "approved_at": "2026-06-06 04:31:17",
+      "notes": null,
+      "conflict_reason": null
+    },
+    {
+      "id": 1,
+      "version": "2.0.0",
+      "environment": "prod",
+      "status": "pending",
+      "requested_by": "13623",
+      "requested_at": "2026-06-06 04:30:47",
+      "approved_by": null,
+      "approved_at": null,
+      "notes": "回归测试",
+      "conflict_reason": null
+    }
+  ],
+  "plan_summaries": [
+    {
+      "release_id": 2,
+      "version": "2.0.0",
+      "environment": "staging",
+      "status": "success",
+      "applied_by": "13623",
+      "approved_by": null,
+      "applied_at": "2026-06-06 04:30:47",
+      "conflict_reason": null,
+      "plan_summary": {
+        "total_changes": 10,
+        "added_count": 0,
+        "removed_count": 0,
+        "modified_count": 10,
+        "added_keys": [],
+        "removed_keys": [],
+        "modified_keys": [
+          "metadata.added.release_date",
+          "database.modified.name",
+          "version",
+          "api_endpoints",
+          "metadata.modified.description",
+          "database.modified.pool_size",
+          "database.added.timeout",
+          "database.modified.host",
+          "features.added.analytics",
+          "features.modified.dark_mode"
+        ]
+      }
+    },
+    {
+      "release_id": 1,
+      "version": "1.0.0",
+      "environment": "staging",
+      "status": "success",
+      "applied_by": "13623",
+      "approved_by": null,
+      "applied_at": "2026-06-06 04:30:46",
+      "conflict_reason": null,
+      "plan_summary": {
+        "total_changes": 12,
+        "added_count": 12,
+        "removed_count": 0,
+        "modified_count": 0,
+        "added_keys": [
+          "metadata.team",
+          "app_name",
+          "features.auth",
+          "version",
+          "database.name",
+          "metadata.description",
+          "api_endpoints",
+          "database.host",
+          "database.port",
+          "features.dark_mode",
+          "features.notifications",
+          "database.pool_size"
+        ],
+        "removed_keys": [],
+        "modified_keys": []
+      }
+    }
+  ],
+  "audit_logs": [
+    {
+      "id": 13,
+      "action": "apply",
+      "environment": "prod",
+      "version": "1.0.0",
+      "status": "failed",
+      "operator": "13623",
+      "timestamp": "2026-06-06 04:31:17",
+      "details": {
+        "conflict_reason": "Environment 'prod' is locked. Reason: 回归测试锁定 (locked by 13623)",
+        "role": "release-manager"
+      },
+      "error_reason": "Environment 'prod' is locked. Reason: 回归测试锁定 (locked by 13623)",
+      "conflict_reason": "Environment 'prod' is locked. Reason: 回归测试锁定 (locked by 13623)"
+    },
+    {
+      "id": 12,
+      "action": "approve",
+      "environment": "prod",
+      "version": "1.0.0",
+      "status": "success",
+      "operator": "13623",
+      "timestamp": "2026-06-06 04:31:17",
+      "details": {
+        "role": "release-manager",
+        "notes": null,
+        "requested_by": "13623"
+      },
+      "error_reason": null,
+      "conflict_reason": null
+    },
+    {
+      "id": 11,
+      "action": "pending",
+      "environment": "prod",
+      "version": "1.0.0",
+      "status": "success",
+      "operator": "13623",
+      "timestamp": "2026-06-06 04:31:16",
+      "details": {
+        "role": "developer",
+        "notes": null
+      },
+      "error_reason": null,
+      "conflict_reason": null
+    },
+    {
+      "id": 10,
+      "action": "history",
+      "environment": null,
+      "version": null,
+      "status": "success",
+      "operator": "13623",
+      "timestamp": "2026-06-06 04:30:48",
+      "details": {
+        "type": "all",
+        "limit": 50
+      },
+      "error_reason": null,
+      "conflict_reason": null
+    },
+    {
+      "id": 9,
+      "action": "pending-list",
+      "environment": null,
+      "version": null,
+      "status": "success",
+      "operator": "13623",
+      "timestamp": "2026-06-06 04:30:47",
+      "details": {
+        "show_all": false,
+        "approval_count": 1
+      },
+      "error_reason": null,
+      "conflict_reason": null
+    },
+    {
+      "id": 8,
+      "action": "pending",
+      "environment": "prod",
+      "version": "2.0.0",
+      "status": "success",
+      "operator": "13623",
+      "timestamp": "2026-06-06 04:30:47",
+      "details": {
+        "role": "developer",
+        "notes": "回归测试"
+      },
+      "error_reason": null,
+      "conflict_reason": null
+    },
+    {
+      "id": 7,
+      "action": "apply",
+      "environment": "staging",
+      "version": "2.0.0",
+      "status": "success",
+      "operator": "13623",
+      "timestamp": "2026-06-06 04:30:47",
+      "details": {
+        "total_changes": 10,
+        "added_count": 0,
+        "removed_count": 0,
+        "modified_count": 10,
+        "added_keys": [],
+        "removed_keys": [],
+        "modified_keys": [
+          "metadata.added.release_date",
+          "database.modified.name",
+          "version",
+          "api_endpoints",
+          "metadata.modified.description",
+          "database.modified.pool_size",
+          "database.added.timeout",
+          "database.modified.host",
+          "features.added.analytics",
+          "features.modified.dark_mode"
+        ],
+        "role": "developer",
+        "approved_by": null
+      },
+      "error_reason": null,
+      "conflict_reason": null
+    },
+    {
+      "id": 6,
+      "action": "apply",
+      "environment": "prod",
+      "version": "2.0.0",
+      "status": "failed",
+      "operator": "13623",
+      "timestamp": "2026-06-06 04:30:46",
+      "details": {
+        "conflict_reason": "Version 2.0.0 must be deployed to staging before prod",
+        "role": "release-manager"
+      },
+      "error_reason": "Version 2.0.0 must be deployed to staging before prod",
+      "conflict_reason": "Version 2.0.0 must be deployed to staging before prod"
+    },
+    {
+      "id": 5,
+      "action": "lock",
+      "environment": "prod",
+      "version": null,
+      "status": "success",
+      "operator": "13623",
+      "timestamp": "2026-06-06 04:30:46",
+      "details": {
+        "reason": "回归测试锁定",
+        "role": "release-manager"
+      },
+      "error_reason": null,
+      "conflict_reason": null
+    },
+    {
+      "id": 4,
+      "action": "apply",
+      "environment": "staging",
+      "version": "1.0.0",
+      "status": "success",
+      "operator": "13623",
+      "timestamp": "2026-06-06 04:30:46",
+      "details": {
+        "total_changes": 12,
+        "added_count": 12,
+        "removed_count": 0,
+        "modified_count": 0,
+        "added_keys": [
+          "metadata.team",
+          "app_name",
+          "features.auth",
+          "version",
+          "database.name",
+          "metadata.description",
+          "api_endpoints",
+          "database.host",
+          "database.port",
+          "features.dark_mode",
+          "features.notifications",
+          "database.pool_size"
+        ],
+        "removed_keys": [],
+        "modified_keys": [],
+        "role": "developer",
+        "approved_by": null
+      },
+      "error_reason": null,
+      "conflict_reason": null
+    },
+    {
+      "id": 3,
+      "action": "import",
+      "environment": null,
+      "version": "2.0.0",
+      "status": "success",
+      "operator": "13623",
+      "timestamp": "2026-06-06 04:30:45",
+      "details": {
+        "app_name": "myapp",
+        "file": "config_pipeline/examples/config_v2.json"
+      },
+      "error_reason": null,
+      "conflict_reason": null
+    },
+    {
+      "id": 2,
+      "action": "import",
+      "environment": null,
+      "version": "1.0.0",
+      "status": "success",
+      "operator": "13623",
+      "timestamp": "2026-06-06 04:30:45",
+      "details": {
+        "app_name": "myapp",
+        "file": "config_pipeline/examples/config_v1.json"
+      },
+      "error_reason": null,
+      "conflict_reason": null
+    },
+    {
+      "id": 1,
+      "action": "init",
+      "environment": null,
+      "version": null,
+      "status": "success",
+      "operator": "13623",
+      "timestamp": "2026-06-06 04:30:45",
+      "details": null,
+      "error_reason": null,
+      "conflict_reason": null
+    }
+  ],
+  "releases": [
+    {
+      "id": 2,
+      "version": "2.0.0",
+      "environment": "staging",
+      "status": "success",
+      "created_by": "13623",
+      "approved_by": null,
+      "conflict_reason": null,
+      "created_at": "2026-06-06 04:30:47"
+    },
+    {
+      "id": 1,
+      "version": "1.0.0",
+      "environment": "staging",
+      "status": "success",
+      "created_by": "13623",
+      "approved_by": null,
+      "conflict_reason": null,
+      "created_at": "2026-06-06 04:30:46"
+    }
+  ],
+  "rollbacks": [],
+  "error_logs": [
+    {
+      "id": 2,
+      "command": "apply",
+      "error_code": "ENVIRONMENT_LOCKED",
+      "error_message": "Environment 'prod' is locked. Reason: 回归测试锁定 (locked by 13623)",
+      "environment": "prod",
+      "version": "1.0.0",
+      "operator": "13623",
+      "timestamp": "2026-06-06 04:31:17",
+      "details": null
+    },
+    {
+      "id": 1,
+      "command": "apply",
+      "error_code": "STAGING_REQUIRED",
+      "error_message": "Version 2.0.0 must be deployed to staging before prod",
+      "environment": "prod",
+      "version": "2.0.0",
+      "operator": "13623",
+      "timestamp": "2026-06-06 04:30:46",
+      "details": null
+    }
+  ]
+}
