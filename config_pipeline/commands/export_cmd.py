@@ -6,7 +6,7 @@ from datetime import datetime
 from ..utils import (
     log_audit,
     log_error,
-    get_audit_logs,
+    get_audit_logs_filtered,
     get_releases,
     get_rollbacks,
     get_all_error_logs,
@@ -19,6 +19,8 @@ from ..utils import (
     VALID_ENVIRONMENTS,
 )
 
+VALID_STATUS = ["success", "failed"]
+
 
 def validate_environment(env):
     if env not in VALID_ENVIRONMENTS:
@@ -26,11 +28,45 @@ def validate_environment(env):
     return True
 
 
+def validate_status(status):
+    if status is not None and status not in VALID_STATUS:
+        raise click.BadParameter(
+            f"Invalid status '{status}'. Must be one of: {', '.join(VALID_STATUS)}"
+        )
+    return status
+
+
+def parse_since(since_str):
+    if since_str is None:
+        return None, None
+
+    formats = [
+        "%Y-%m-%d",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d %H:%M:%S.%f",
+        "%Y-%m-%dT%H:%M:%S.%f",
+    ]
+
+    for fmt in formats:
+        try:
+            dt = datetime.strptime(since_str, fmt)
+            if fmt == "%Y-%m-%d":
+                dt = dt.replace(hour=0, minute=0, second=0, microsecond=0)
+            return dt.isoformat(), dt
+        except ValueError:
+            continue
+
+    return None, None
+
+
 @click.command()
 @click.option("--env", type=click.STRING, default=None, help="Filter by environment")
+@click.option("--status", type=click.STRING, default=None, help="Filter by audit status (success/failed)")
+@click.option("--since", type=click.STRING, default=None, help="Filter by timestamp (YYYY-MM-DD or ISO datetime)")
 @click.option("--output", type=click.Path(), default=None, help="Output file path")
 @click.option("--format", "output_format", type=click.Choice(["json", "markdown"]), default="json", help="Output format")
-def export(env, output, output_format):
+def export(env, status, since, output, output_format):
     """Export audit data and configuration history."""
     if env is not None:
         try:
@@ -41,10 +77,24 @@ def export(env, output, output_format):
             raise click.ClickException(e.message)
 
     try:
+        validate_status(status)
+    except click.BadParameter as e:
+        log_error("export", "INVALID_STATUS", str(e), environment=env)
+        log_audit("export", "failed", environment=env, error_reason=str(e))
+        raise e
+
+    since_iso, since_dt = parse_since(since)
+    if since is not None and since_iso is None:
+        error_msg = f"Invalid --since format '{since}'. Expected YYYY-MM-DD or ISO datetime (e.g., 2024-01-01 or 2024-01-01T12:00:00)"
+        log_error("export", "INVALID_SINCE_FORMAT", error_msg, environment=env, details={"since_input": since})
+        log_audit("export", "failed", environment=env, error_reason=error_msg, details={"since_input": since})
+        raise click.ClickException(error_msg)
+
+    try:
         env_status = get_environment_status()
         locks = get_all_environment_locks()
         approvals = get_all_approvals(environment=env, limit=1000)
-        audit_logs = get_audit_logs(limit=1000)
+        audit_logs = get_audit_logs_filtered(environment=env, status=status, since=since_iso, limit=1000)
         releases = get_releases(environment=env, limit=1000)
         rollbacks = get_rollbacks(environment=env, limit=1000)
         error_logs = get_all_error_logs(limit=1000)
@@ -54,7 +104,6 @@ def export(env, output, output_format):
         raise click.ClickException(f"Failed to read data: {e}")
 
     if env:
-        audit_logs = [a for a in audit_logs if a["environment"] == env]
         error_logs = [e for e in error_logs if e["environment"] == env]
 
     export_data = {
@@ -62,6 +111,8 @@ def export(env, output, output_format):
             "exported_at": get_current_time(),
             "exported_by": get_current_user(),
             "environment_filter": env,
+            "status_filter": status,
+            "since_filter": since_iso,
             "record_counts": {
                 "audit_logs": len(audit_logs),
                 "releases": len(releases),
@@ -203,7 +254,7 @@ def export(env, output, output_format):
         "export",
         "success",
         environment=env,
-        details={"format": output_format, "output": output, "record_count": len(audit_logs)}
+        details={"format": output_format, "output": output, "record_count": len(audit_logs), "status_filter": status, "since_filter": since_iso}
     )
 
 
@@ -217,6 +268,10 @@ def _format_markdown(data):
     lines.append(f"**Exported By:** {data['export_metadata']['exported_by']}")
     if data['export_metadata']['environment_filter']:
         lines.append(f"**Environment Filter:** {data['export_metadata']['environment_filter']}")
+    if data['export_metadata'].get('status_filter'):
+        lines.append(f"**Status Filter:** {data['export_metadata']['status_filter']}")
+    if data['export_metadata'].get('since_filter'):
+        lines.append(f"**Since Filter:** {data['export_metadata']['since_filter']}")
     lines.append("")
     
     lines.append("## Environment Status")
@@ -266,12 +321,19 @@ def _format_markdown(data):
     
     lines.append("## Audit Log")
     lines.append("")
-    lines.append("| ID | Action | Env | Version | Status | Operator | Timestamp | Error Reason | Conflict Reason |")
-    lines.append("|----|--------|-----|---------|--------|----------|-----------|--------------|-----------------|")
+    lines.append("| ID | Action | Env | Version | Status | Operator | Timestamp | Error Reason | Conflict Reason | Details |")
+    lines.append("|----|--------|-----|---------|--------|----------|-----------|--------------|-----------------|---------|")
     for audit in data["audit_logs"]:
         error = audit.get("error_reason") or ""
         conflict = audit.get("conflict_reason") or "N/A"
-        lines.append(f"| {audit['id']} | {audit['action']} | {audit['environment'] or 'N/A'} | {audit['version'] or 'N/A'} | {audit['status']} | {audit['operator']} | {audit['timestamp']} | {error} | {conflict} |")
+        details = audit.get("details")
+        if details is not None:
+            details_str = json.dumps(details, ensure_ascii=False)
+            if len(details_str) > 50:
+                details_str = details_str[:47] + "..."
+        else:
+            details_str = "N/A"
+        lines.append(f"| {audit['id']} | {audit['action']} | {audit['environment'] or 'N/A'} | {audit['version'] or 'N/A'} | {audit['status']} | {audit['operator']} | {audit['timestamp']} | {error} | {conflict} | {details_str} |")
     lines.append("")
     
     if data["error_logs"]:

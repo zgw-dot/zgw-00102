@@ -320,6 +320,32 @@ def get_audit_logs(limit=100):
         return [dict(row) for row in rows]
 
 
+def get_audit_logs_filtered(environment=None, status=None, since=None, limit=1000):
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        query = "SELECT * FROM audit_logs WHERE 1=1"
+        params = []
+
+        if environment is not None:
+            query += " AND environment = ?"
+            params.append(environment)
+
+        if status is not None:
+            query += " AND status = ?"
+            params.append(status)
+
+        if since is not None:
+            query += " AND created_at >= ?"
+            params.append(since)
+
+        query += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+        return [dict(row) for row in rows]
+
+
 def get_releases(environment=None, limit=100):
     with get_db_connection() as conn:
         cursor = conn.cursor()

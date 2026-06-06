@@ -161,6 +161,19 @@ python pipeline.py export --output audit.md --format markdown
 
 # 按环境导出
 python pipeline.py export --env prod --output prod_audit.json
+
+# 按状态筛选（success / failed）
+python pipeline.py export --status failed --output failed_audit.json
+
+# 按时间筛选（YYYY-MM-DD 或完整时间格式）
+python pipeline.py export --since 2024-01-01 --output recent_audit.json
+python pipeline.py export --since 2024-01-01T12:00:00 --output recent_audit.json
+
+# 组合筛选（环境 + 状态）
+python pipeline.py export --env prod --status failed --output prod_failed.json
+
+# 组合所有筛选条件
+python pipeline.py export --env staging --status success --since 2024-06-01 --format markdown --output filtered.md
 ```
 
 ---
@@ -251,6 +264,18 @@ python pipeline.py apply 2.0.0 prod --yes
 ```bash
 python pipeline.py approve 2.0.0 prod --role admin
 # 错误: Invalid role 'admin'. Must be one of: developer, release-manager
+```
+
+### 11. 无效 export --status 值
+```bash
+python pipeline.py export --status invalid
+# 错误: Invalid status 'invalid'. Must be one of: success, failed
+```
+
+### 12. 无效 export --since 格式
+```bash
+python pipeline.py export --since not-a-date
+# 错误: Invalid --since format 'not-a-date'. Expected YYYY-MM-DD or ISO datetime (e.g., 2024-01-01 or 2024-01-01T12:00:00)
 ```
 
 ---
