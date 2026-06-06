@@ -53,7 +53,8 @@ def parse_since(since_str):
             dt = datetime.strptime(since_str, fmt)
             if fmt == "%Y-%m-%d":
                 dt = dt.replace(hour=0, minute=0, second=0, microsecond=0)
-            return dt.isoformat(), dt
+            db_format = dt.strftime("%Y-%m-%d %H:%M:%S")
+            return db_format, dt
         except ValueError:
             continue
 
@@ -83,8 +84,8 @@ def export(env, status, since, output, output_format):
         log_audit("export", "failed", environment=env, error_reason=str(e))
         raise e
 
-    since_iso, since_dt = parse_since(since)
-    if since is not None and since_iso is None:
+    since_db, since_dt = parse_since(since)
+    if since is not None and since_db is None:
         error_msg = f"Invalid --since format '{since}'. Expected YYYY-MM-DD or ISO datetime (e.g., 2024-01-01 or 2024-01-01T12:00:00)"
         log_error("export", "INVALID_SINCE_FORMAT", error_msg, environment=env, details={"since_input": since})
         log_audit("export", "failed", environment=env, error_reason=error_msg, details={"since_input": since})
@@ -94,7 +95,7 @@ def export(env, status, since, output, output_format):
         env_status = get_environment_status()
         locks = get_all_environment_locks()
         approvals = get_all_approvals(environment=env, limit=1000)
-        audit_logs = get_audit_logs_filtered(environment=env, status=status, since=since_iso, limit=1000)
+        audit_logs = get_audit_logs_filtered(environment=env, status=status, since=since_db, limit=1000)
         releases = get_releases(environment=env, limit=1000)
         rollbacks = get_rollbacks(environment=env, limit=1000)
         error_logs = get_all_error_logs(limit=1000)
@@ -112,7 +113,7 @@ def export(env, status, since, output, output_format):
             "exported_by": get_current_user(),
             "environment_filter": env,
             "status_filter": status,
-            "since_filter": since_iso,
+            "since_filter": since_db,
             "record_counts": {
                 "audit_logs": len(audit_logs),
                 "releases": len(releases),
@@ -254,7 +255,7 @@ def export(env, status, since, output, output_format):
         "export",
         "success",
         environment=env,
-        details={"format": output_format, "output": output, "record_count": len(audit_logs), "status_filter": status, "since_filter": since_iso}
+        details={"format": output_format, "output": output, "record_count": len(audit_logs), "status_filter": status, "since_filter": since_db}
     )
 
 
