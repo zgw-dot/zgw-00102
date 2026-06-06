@@ -13,9 +13,13 @@ from ..utils import (
     get_role,
     is_environment_locked,
     get_environment_lock,
+    check_release_window,
     EnvironmentError,
     VersionNotFoundError,
     EnvironmentLockedError,
+    ReleaseWindowError,
+    OverridePermissionDeniedError,
+    InvalidWindowTimeError,
     VALID_ENVIRONMENTS,
     compute_diff,
     format_diff,
@@ -35,7 +39,9 @@ def validate_environment(env):
 @click.option("--role", type=click.STRING, default=None, help="User role (developer or release-manager)")
 @click.option("--reason", type=click.STRING, default=None, help="Reason for rollback")
 @click.option("--yes", is_flag=True, help="Skip confirmation prompt")
-def rollback(environment, target_version, role, reason, yes):
+@click.option("--override-window", is_flag=True, help="Override closed release window (release-manager only)")
+@click.option("--override-reason", type=click.STRING, default=None, help="Reason for overriding the release window")
+def rollback(environment, target_version, role, reason, yes, override_window, override_reason):
     """Rollback an environment to a previous version."""
     try:
         current_role = get_role(role)
@@ -50,6 +56,34 @@ def rollback(environment, target_version, role, reason, yes):
         log_error("rollback", e.code, e.message, environment=environment, version=target_version)
         log_audit("rollback", "failed", environment=environment, version=target_version, error_reason=e.message)
         raise click.ClickException(e.message)
+
+    override_info = None
+    try:
+        _, window_info, override_info = check_release_window(
+            environment,
+            version=target_version,
+            override=override_window,
+            override_reason=override_reason,
+            cli_role=role,
+            action="rollback"
+        )
+    except (ReleaseWindowError, OverridePermissionDeniedError, InvalidWindowTimeError) as e:
+        if isinstance(e, InvalidWindowTimeError):
+            log_error("rollback", e.code, e.message, environment=environment, version=target_version)
+            log_audit(
+                "rollback",
+                "failed",
+                environment=environment,
+                version=target_version,
+                error_reason=e.message,
+                details={
+                    "conflict_reason": e.message,
+                    "role": current_role,
+                    "override_window": override_window,
+                    "override_reason": override_reason
+                }
+            )
+        raise click.ClickException(f"{e.message} [{e.code}]")
 
     if is_environment_locked(environment):
         lock_info = get_environment_lock(environment)
@@ -141,6 +175,12 @@ def rollback(environment, target_version, role, reason, yes):
     
     click.echo("-" * 60)
 
+    window_override_reason_str = None
+    if override_info:
+        window_override_reason_str = json.dumps(override_info)
+        click.echo(click.style(f"! Release window overridden: {override_info['override_reason']}", fg="yellow"))
+        click.echo(f"  Overridden by: {override_info['overridden_by']}")
+
     if not yes:
         confirm = click.confirm(
             f"Are you sure you want to rollback {environment} from {current_version} to {target_version}?",
@@ -163,7 +203,8 @@ def rollback(environment, target_version, role, reason, yes):
             environment,
             target_config,
             "success",
-            plan_summary=json.dumps(plan_summary)
+            plan_summary=json.dumps(plan_summary),
+            window_override_reason=window_override_reason_str
         )
 
         set_current_version(environment, target_version)
@@ -181,12 +222,15 @@ def rollback(environment, target_version, role, reason, yes):
         click.echo("=" * 60)
         click.echo(f"Environment {environment} is now at version {target_version}")
 
+        success_details = {"from_version": current_version, "reason": reason, "role": current_role, **plan_summary}
+        if override_info:
+            success_details["window_override"] = override_info
         log_audit(
             "rollback",
             "success",
             environment=environment,
             version=target_version,
-            details={"from_version": current_version, "reason": reason, "role": current_role, **plan_summary}
+            details=success_details
         )
 
     except Exception as e:

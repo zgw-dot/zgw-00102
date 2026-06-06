@@ -20,6 +20,7 @@ from ..utils import (
     get_latest_preview,
     check_preview_drift,
     delete_preview,
+    check_release_window,
     EnvironmentError,
     VersionNotFoundError,
     DuplicateVersionError,
@@ -31,11 +32,17 @@ from ..utils import (
     PreviewNotFoundError,
     PreviewDriftError,
     PreviewAckDeniedError,
+    ReleaseWindowError,
+    OverridePermissionDeniedError,
+    InvalidWindowTimeError,
+    PackageNotSignedError,
     VALID_ENVIRONMENTS,
     compute_diff,
     has_changes,
     format_diff,
     generate_plan_summary,
+    check_package_signoff,
+    is_version_in_signed_package,
 )
 
 
@@ -45,9 +52,18 @@ def validate_environment(env):
     return True
 
 
-def pre_apply_checks(version, environment, cli_role=None):
+def pre_apply_checks(version, environment, cli_role=None, override_window=False, override_reason=None):
     """Run all pre-apply validation checks."""
     validate_environment(environment)
+
+    can_proceed, window_info, override_info = check_release_window(
+        environment,
+        version=version,
+        override=override_window,
+        override_reason=override_reason,
+        cli_role=cli_role,
+        action="apply"
+    )
 
     if not config_exists(version):
         raise VersionNotFoundError(version)
@@ -70,6 +86,12 @@ def pre_apply_checks(version, environment, cli_role=None):
 
     if not is_approved(version, environment):
         raise ApprovalRequiredError(version, environment)
+
+    is_valid, pkg_name, error_msg = check_package_signoff(version, environment)
+    if not is_valid:
+        raise PackageNotSignedError(pkg_name or "unknown", version, environment)
+
+    return can_proceed, window_info, override_info
 
 
 def _check_drift_ack_permissions(environment, drift_reasons, cli_role):
@@ -101,7 +123,9 @@ def _check_drift_ack_permissions(environment, drift_reasons, cli_role):
 @click.option("--yes", is_flag=True, help="Skip confirmation prompt")
 @click.option("--from-preview", is_flag=True, help="Apply from saved preview and check for drift")
 @click.option("--ack-drift", is_flag=True, help="Acknowledge and proceed despite drift (release-manager only for prod/locks)")
-def apply(version, environment, role, yes, from_preview, ack_drift):
+@click.option("--override-window", is_flag=True, help="Override closed release window (release-manager only)")
+@click.option("--override-reason", type=click.STRING, default=None, help="Reason for overriding the release window")
+def apply(version, environment, role, yes, from_preview, ack_drift, override_window, override_reason):
     """Apply a configuration version to an environment."""
     try:
         current_role = get_role(role)
@@ -195,23 +219,33 @@ def apply(version, environment, role, yes, from_preview, ack_drift):
     if version is None or environment is None:
         raise click.ClickException("Usage: apply VERSION ENVIRONMENT [OPTIONS] or use --from-preview")
 
+    override_info = None
     try:
-        pre_apply_checks(version, environment, cli_role=role)
-    except (EnvironmentError, VersionNotFoundError, DuplicateVersionError, StagingRequiredError, EnvironmentLockedError, ApprovalRequiredError, PermissionDeniedError) as e:
-        log_error("apply", e.code, e.message, environment=environment, version=version)
-        log_audit(
-            "apply",
-            "failed",
-            environment=environment,
-            version=version,
-            error_reason=e.message,
-            details={
-                "conflict_reason": e.message,
-                "role": current_role,
-                "from_preview": from_preview
-            }
+        _, window_info, override_info = pre_apply_checks(
+            version, environment, cli_role=role,
+            override_window=override_window,
+            override_reason=override_reason
         )
-        raise click.ClickException(e.message)
+    except (EnvironmentError, VersionNotFoundError, DuplicateVersionError, StagingRequiredError, EnvironmentLockedError, ApprovalRequiredError, PermissionDeniedError, ReleaseWindowError, OverridePermissionDeniedError, InvalidWindowTimeError, PackageNotSignedError) as e:
+        if isinstance(e, ReleaseWindowError) or isinstance(e, OverridePermissionDeniedError):
+            pass
+        else:
+            log_error("apply", e.code, e.message, environment=environment, version=version)
+            log_audit(
+                "apply",
+                "failed",
+                environment=environment,
+                version=version,
+                error_reason=e.message,
+                details={
+                    "conflict_reason": e.message,
+                    "role": current_role,
+                    "from_preview": from_preview,
+                    "override_window": override_window,
+                    "override_reason": override_reason
+                }
+            )
+        raise click.ClickException(f"{e.message} [{e.code}]")
 
     try:
         target_config_data = get_config(version)
@@ -279,6 +313,12 @@ def apply(version, environment, role, yes, from_preview, ack_drift):
     approval = get_approval(version, environment)
     approved_by = approval["approved_by"] if approval and approval.get("approved_by") else None
 
+    window_override_reason_str = None
+    if override_info:
+        window_override_reason_str = json.dumps(override_info)
+        click.echo(click.style(f"! Release window overridden: {override_info['override_reason']}", fg="yellow"))
+        click.echo(f"  Overridden by: {override_info['overridden_by']}")
+
     try:
         insert_release(
             version,
@@ -287,7 +327,8 @@ def apply(version, environment, role, yes, from_preview, ack_drift):
             "success",
             plan_summary=json.dumps(plan_summary),
             approved_by=approved_by,
-            conflict_reason=json.dumps({"from_preview": from_preview}) if from_preview else None
+            conflict_reason=json.dumps({"from_preview": from_preview}) if from_preview else None,
+            window_override_reason=window_override_reason_str
         )
 
         set_current_version(environment, version)
@@ -303,17 +344,20 @@ def apply(version, environment, role, yes, from_preview, ack_drift):
         if approved_by:
             click.echo(f"Approved by:    {approved_by}")
 
+        success_details = {
+            **plan_summary,
+            "role": current_role,
+            "approved_by": approved_by,
+            "from_preview": from_preview
+        }
+        if override_info:
+            success_details["window_override"] = override_info
         log_audit(
             "apply",
             "success",
             environment=environment,
             version=version,
-            details={
-                **plan_summary,
-                "role": current_role,
-                "approved_by": approved_by,
-                "from_preview": from_preview
-            }
+            details=success_details
         )
 
     except Exception as e:

@@ -21,6 +21,7 @@ from ..utils import (
     get_latest_preview,
     check_preview_drift,
     delete_preview,
+    check_release_window,
     EnvironmentError,
     VersionNotFoundError,
     DuplicateVersionError,
@@ -30,11 +31,17 @@ from ..utils import (
     ApprovalRequiredError,
     PermissionDeniedError,
     PreviewDriftError,
+    ReleaseWindowError,
+    OverridePermissionDeniedError,
+    InvalidWindowTimeError,
+    PackageNotSignedError,
     VALID_ENVIRONMENTS,
     compute_diff,
     has_changes,
     format_diff,
     generate_plan_summary,
+    check_package_signoff,
+    is_version_in_signed_package,
 )
 
 
@@ -56,10 +63,19 @@ def parse_step(step_str):
     return env, version
 
 
-def pre_apply_checks(version, environment, cli_role=None):
+def pre_apply_checks(version, environment, cli_role=None, override_window=False, override_reason=None):
     """Run all pre-apply validation checks."""
     if environment not in VALID_ENVIRONMENTS:
         raise EnvironmentError(environment, VALID_ENVIRONMENTS)
+
+    _, window_info, override_info = check_release_window(
+        environment,
+        version=version,
+        override=override_window,
+        override_reason=override_reason,
+        cli_role=cli_role,
+        action="batch_apply"
+    )
 
     if not config_exists(version):
         raise VersionNotFoundError(version)
@@ -83,15 +99,21 @@ def pre_apply_checks(version, environment, cli_role=None):
     if not is_approved(version, environment):
         raise ApprovalRequiredError(version, environment)
 
+    is_valid, pkg_name, error_msg = check_package_signoff(version, environment)
+    if not is_valid:
+        raise PackageNotSignedError(pkg_name or "unknown", version, environment)
 
-def apply_single_step(version, environment, cli_role=None, yes=False, previous_successful_envs=None):
+    return _, window_info, override_info
+
+
+def apply_single_step(version, environment, cli_role=None, yes=False, previous_successful_envs=None, override_window=False, override_reason=None):
     """Apply a single version to an environment, with drift checking.
     
     Args:
         previous_successful_envs: Set of environments that were successfully updated
             in previous steps of the same batch. Drift caused by these steps will be ignored.
     
-    Returns (success, error_message, drift_reasons)
+    Returns (success, error_message, drift_reasons, override_info)
     """
     current_role = get_role(cli_role)
     previous_successful_envs = previous_successful_envs or set()
@@ -128,25 +150,35 @@ def apply_single_step(version, environment, cli_role=None, yes=False, previous_s
                         "step": f"{environment}:{version}"
                     }
                 )
-                return False, err.message, filtered_drift
+                return False, err.message, filtered_drift, None
 
+    override_info = None
     try:
-        pre_apply_checks(version, environment, cli_role=cli_role)
-    except (EnvironmentError, VersionNotFoundError, DuplicateVersionError, StagingRequiredError, EnvironmentLockedError, ApprovalRequiredError, PermissionDeniedError) as e:
-        log_error("batch_apply", e.code, e.message, environment=environment, version=version)
-        log_audit(
-            "batch_apply",
-            "failed",
-            environment=environment,
-            version=version,
-            error_reason=e.message,
-            details={
-                "conflict_reason": e.message,
-                "role": current_role,
-                "step": f"{environment}:{version}"
-            }
+        _, window_info, override_info = pre_apply_checks(
+            version, environment, cli_role=cli_role,
+            override_window=override_window,
+            override_reason=override_reason
         )
-        return False, e.message, None
+    except (EnvironmentError, VersionNotFoundError, DuplicateVersionError, StagingRequiredError, EnvironmentLockedError, ApprovalRequiredError, PermissionDeniedError, ReleaseWindowError, OverridePermissionDeniedError, InvalidWindowTimeError, PackageNotSignedError) as e:
+        if isinstance(e, ReleaseWindowError) or isinstance(e, OverridePermissionDeniedError):
+            pass
+        else:
+            log_error("batch_apply", e.code, e.message, environment=environment, version=version)
+            log_audit(
+                "batch_apply",
+                "failed",
+                environment=environment,
+                version=version,
+                error_reason=e.message,
+                details={
+                    "conflict_reason": e.message,
+                    "role": current_role,
+                    "step": f"{environment}:{version}",
+                    "override_window": override_window,
+                    "override_reason": override_reason
+                }
+            )
+        return False, f"{e.message} [{e.code}]", None, None
 
     try:
         target_config_data = get_config(version)
@@ -154,7 +186,7 @@ def apply_single_step(version, environment, cli_role=None, yes=False, previous_s
     except Exception as e:
         log_error("batch_apply", "CONFIG_READ_ERROR", str(e), environment=environment, version=version)
         log_audit("batch_apply", "failed", environment=environment, version=version, error_reason=str(e))
-        return False, f"Failed to read target config: {e}", None
+        return False, f"Failed to read target config: {e}", None, None
 
     current_version = get_current_version(environment)
     current_config = None
@@ -170,9 +202,16 @@ def apply_single_step(version, environment, cli_role=None, yes=False, previous_s
         err = NoChangesError()
         log_error("batch_apply", err.code, err.message, environment=environment, version=version)
         log_audit("batch_apply", "failed", environment=environment, version=version, error_reason=err.message)
-        return False, err.message, None
+        return False, err.message, None, None
 
     plan_summary = generate_plan_summary(diff)
+
+    window_override_reason_str = None
+    if override_info:
+        window_override_reason_str = json.dumps(override_info)
+        if not yes:
+            click.echo(click.style(f"! Release window overridden: {override_info['override_reason']}", fg="yellow"))
+            click.echo(f"  Overridden by: {override_info['overridden_by']}")
 
     if not yes:
         click.echo("=" * 60)
@@ -201,7 +240,8 @@ def apply_single_step(version, environment, cli_role=None, yes=False, previous_s
             "success",
             plan_summary=json.dumps(plan_summary),
             approved_by=approved_by,
-            conflict_reason=json.dumps({"from_preview": preview_data is not None}) if preview_data else None
+            conflict_reason=json.dumps({"from_preview": preview_data is not None}) if preview_data else None,
+            window_override_reason=window_override_reason_str
         )
 
         set_current_version(environment, version)
@@ -209,21 +249,24 @@ def apply_single_step(version, environment, cli_role=None, yes=False, previous_s
         if preview_data:
             delete_preview(version, environment)
 
+        success_details = {
+            **plan_summary,
+            "role": current_role,
+            "approved_by": approved_by,
+            "from_preview": preview_data is not None,
+            "step": f"{environment}:{version}"
+        }
+        if override_info:
+            success_details["window_override"] = override_info
         log_audit(
             "batch_apply",
             "success",
             environment=environment,
             version=version,
-            details={
-                **plan_summary,
-                "role": current_role,
-                "approved_by": approved_by,
-                "from_preview": preview_data is not None,
-                "step": f"{environment}:{version}"
-            }
+            details=success_details
         )
 
-        return True, None, None
+        return True, None, None, override_info
 
     except Exception as e:
         insert_release(
@@ -232,7 +275,8 @@ def apply_single_step(version, environment, cli_role=None, yes=False, previous_s
             target_config,
             "failed",
             plan_summary=json.dumps(plan_summary),
-            conflict_reason=str(e)
+            conflict_reason=str(e),
+            window_override_reason=window_override_reason_str
         )
 
         log_error(
@@ -245,7 +289,9 @@ def apply_single_step(version, environment, cli_role=None, yes=False, previous_s
                 **plan_summary,
                 "conflict_reason": str(e),
                 "role": current_role,
-                "step": f"{environment}:{version}"
+                "step": f"{environment}:{version}",
+                "override_window": override_window,
+                "override_reason": override_reason
             }
         )
         log_audit(
@@ -258,10 +304,12 @@ def apply_single_step(version, environment, cli_role=None, yes=False, previous_s
                 **plan_summary,
                 "conflict_reason": str(e),
                 "role": current_role,
-                "step": f"{environment}:{version}"
+                "step": f"{environment}:{version}",
+                "override_window": override_window,
+                "override_reason": override_reason
             }
         )
-        return False, f"Failed to apply configuration: {e}", None
+        return False, f"Failed to apply configuration: {e}", None, None
 
 
 @click.group()
@@ -274,13 +322,16 @@ def batch():
 @click.argument("steps", nargs=-1, required=True)
 @click.option("--role", type=click.STRING, default=None, help="User role (developer or release-manager)")
 @click.option("--yes", is_flag=True, help="Skip confirmation prompts")
-def batch_apply(steps, role, yes):
+@click.option("--override-window", is_flag=True, help="Override closed release window (release-manager only)")
+@click.option("--override-reason", type=click.STRING, default=None, help="Reason for overriding the release window")
+def batch_apply(steps, role, yes, override_window, override_reason):
     """Apply multiple versions to environments in batch.
     
     Steps should be in format 'environment:version' (e.g., 'dev:2.0.0 staging:2.0.0').
     
-    Each step automatically checks for preview drift. If drift is detected, the step
-    fails and subsequent steps are skipped. Successful steps are preserved.
+    Each step automatically checks for preview drift and release windows. 
+    If drift is detected or release window is closed, the step fails and 
+    subsequent steps are skipped. Successful steps are preserved.
     """
     try:
         current_role = get_role(role)
@@ -336,20 +387,25 @@ def batch_apply(steps, role, yes):
         click.echo("")
         click.echo(f"  [{step_num}/{len(parsed_steps)}] EXECUTING: {step_str}")
 
-        success, error_msg, drift_reasons = apply_single_step(
+        success, error_msg, drift_reasons, override_info = apply_single_step(
             version, env, cli_role=role, yes=yes,
-            previous_successful_envs=previous_successful_envs
+            previous_successful_envs=previous_successful_envs,
+            override_window=override_window,
+            override_reason=override_reason
         )
 
         if success:
             click.echo(f"  [{step_num}/{len(parsed_steps)}] SUCCESS: {step_str}")
             click.echo(f"      Environment {env} is now at version {version}")
+            if override_info:
+                click.echo(f"      Window overridden: {override_info['override_reason']}")
             previous_successful_envs.add(env)
             results.append({
                 "step": step_str,
                 "status": "success",
                 "error_reason": None,
-                "drift_reasons": None
+                "drift_reasons": None,
+                "override_info": override_info
             })
         else:
             failed = True
@@ -364,24 +420,31 @@ def batch_apply(steps, role, yes):
                 "step": step_str,
                 "status": "failed",
                 "error_reason": error_msg,
-                "drift_reasons": drift_reasons
+                "drift_reasons": drift_reasons,
+                "override_info": None
             })
 
     click.echo("")
     click.echo("=" * 60)
+    batch_details = {
+        "steps": len(parsed_steps),
+        "role": current_role,
+        "override_window": override_window,
+        "override_reason": override_reason
+    }
     if batch_success:
         click.echo("BATCH COMPLETED SUCCESSFULLY")
         log_audit(
             "batch_apply",
             "batch_success",
-            details={"steps": len(parsed_steps), "role": current_role}
+            details=batch_details
         )
     else:
         click.echo("BATCH COMPLETED WITH FAILURES")
         log_audit(
             "batch_apply",
             "batch_failed",
-            details={"steps": len(parsed_steps), "role": current_role}
+            details=batch_details
         )
     click.echo("=" * 60)
 

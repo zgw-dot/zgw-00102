@@ -9,6 +9,7 @@ from . import export_cmd
 from . import snapshot_cmd
 from . import preview_cmd
 from . import batch_cmd
+from . import window_cmd
 
 __all__ = [
     "init_cmd",
@@ -22,4 +23,5 @@ __all__ = [
     "snapshot_cmd",
     "preview_cmd",
     "batch_cmd",
+    "window_cmd",
 ]

@@ -172,6 +172,7 @@ def export(env, status, since, output, output_format):
             "approved_by": release.get("approved_by"),
             "applied_at": release["created_at"],
             "conflict_reason": release.get("conflict_reason"),
+            "window_override_reason": release.get("window_override_reason"),
             "plan_summary": plan_summary,
         })
 
@@ -183,6 +184,7 @@ def export(env, status, since, output, output_format):
             "created_by": release["created_by"],
             "approved_by": release.get("approved_by"),
             "conflict_reason": release.get("conflict_reason"),
+            "window_override_reason": release.get("window_override_reason"),
             "created_at": release["created_at"],
         })
 

@@ -188,3 +188,124 @@ class PreviewNoChangesError(PipelineError):
     def __init__(self):
         message = "Preview shows no changes between current and target configuration"
         super().__init__(message, code="PREVIEW_NO_CHANGES")
+
+
+class ReleaseWindowError(PipelineError):
+    """Release window closed error"""
+    def __init__(self, environment, window_info=None):
+        self.environment = environment
+        self.window_info = window_info
+        window_part = ""
+        if window_info:
+            reason = window_info.get("reason", "")
+            start_time = window_info.get("start_time", "")
+            end_time = window_info.get("end_time", "")
+            window_part = f" Reason: {reason}. Window: {start_time} to {end_time}"
+        message = f"Environment '{environment}' is in a closed release window.{window_part}"
+        super().__init__(message, code="RELEASE_WINDOW_CLOSED")
+
+
+class OverridePermissionDeniedError(PipelineError):
+    """Override window permission denied error"""
+    def __init__(self, action, required_role, current_role=None):
+        self.action = action
+        self.required_role = required_role
+        self.current_role = current_role
+        role_part = f" Your role: {current_role}" if current_role else ""
+        message = f"Permission denied to override release window for '{action}'. Required role: {required_role}.{role_part}"
+        super().__init__(message, code="OVERRIDE_PERMISSION_DENIED")
+
+
+class InvalidWindowTimeError(PipelineError):
+    """Invalid release window time error"""
+    def __init__(self, message):
+        super().__init__(message, code="INVALID_WINDOW_TIME")
+
+
+class OverlappingWindowError(PipelineError):
+    """Overlapping release window error"""
+    def __init__(self, environment, overlapping_windows=None):
+        self.environment = environment
+        self.overlapping_windows = overlapping_windows or []
+        windows_str = "\n  - ".join([
+            f"ID: {w['id']}, {w['start_time']} to {w['end_time']}"
+            for w in overlapping_windows
+        ]) if overlapping_windows else "unknown"
+        message = f"Overlapping release window detected for environment '{environment}':\n  - {windows_str}"
+        super().__init__(message, code="OVERLAPPING_WINDOW")
+
+
+class WindowNotFoundError(PipelineError):
+    """Release window not found error"""
+    def __init__(self, window_id):
+        self.window_id = window_id
+        message = f"Release window with ID {window_id} not found"
+        super().__init__(message, code="WINDOW_NOT_FOUND")
+
+
+class PackageAlreadyExistsError(PipelineError):
+    """Change package with this name already exists"""
+    def __init__(self, package_name):
+        self.package_name = package_name
+        message = f"Change package '{package_name}' already exists"
+        super().__init__(message, code="PACKAGE_ALREADY_EXISTS")
+
+
+class PackageNotFoundError(PipelineError):
+    """Change package not found"""
+    def __init__(self, package_name):
+        self.package_name = package_name
+        message = f"Change package '{package_name}' not found"
+        super().__init__(message, code="PACKAGE_NOT_FOUND")
+
+
+class PackageVersionNotFoundError(PipelineError):
+    """Version referenced in package does not exist"""
+    def __init__(self, version):
+        self.version = version
+        message = f"Version '{version}' referenced in package not found in configs"
+        super().__init__(message, code="PACKAGE_VERSION_NOT_FOUND")
+
+
+class PackageSummaryMismatchError(PipelineError):
+    """Package summary mismatch during import"""
+    def __init__(self, package_name, expected_hash, actual_hash):
+        self.package_name = package_name
+        self.expected_hash = expected_hash
+        self.actual_hash = actual_hash
+        message = f"Package '{package_name}' summary mismatch during import. Expected: {expected_hash[:12]}..., Actual: {actual_hash[:12]}..."
+        super().__init__(message, code="PACKAGE_SUMMARY_MISMATCH")
+
+
+class PackageNotSignedError(PipelineError):
+    """Package must be signed before release to prod"""
+    def __init__(self, package_name, version, environment):
+        self.package_name = package_name
+        self.version = version
+        self.environment = environment
+        message = f"Version '{version}' must be in a signed package '{package_name}' before release to {environment}. Use 'pipeline package sign' first."
+        super().__init__(message, code="PACKAGE_NOT_SIGNED")
+
+
+class PackageAlreadySignedError(PipelineError):
+    """Package is already signed"""
+    def __init__(self, package_name):
+        self.package_name = package_name
+        message = f"Package '{package_name}' is already signed"
+        super().__init__(message, code="PACKAGE_ALREADY_SIGNED")
+
+
+class PackageNotSignedForRevokeError(PipelineError):
+    """Package is not signed, cannot revoke"""
+    def __init__(self, package_name):
+        self.package_name = package_name
+        message = f"Package '{package_name}' is not signed, cannot revoke signoff"
+        super().__init__(message, code="PACKAGE_NOT_SIGNED_FOR_REVOKE")
+
+
+class InvalidPackageFormatError(PipelineError):
+    """Invalid package format during import"""
+    def __init__(self, reason):
+        self.reason = reason
+        message = f"Invalid package format: {reason}"
+        super().__init__(message, code="INVALID_PACKAGE_FORMAT")

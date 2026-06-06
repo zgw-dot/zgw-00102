@@ -1,6 +1,7 @@
 import sqlite3
 import json
 import os
+import hashlib
 import getpass
 from datetime import datetime
 from contextlib import contextmanager
@@ -9,6 +10,12 @@ from .errors import (
     PipelineNotInitializedError,
     InvalidRoleError,
     PermissionDeniedError,
+    EnvironmentError,
+    ReleaseWindowError,
+    OverridePermissionDeniedError,
+    InvalidWindowTimeError,
+    OverlappingWindowError,
+    WindowNotFoundError,
 )
 
 
@@ -177,12 +184,48 @@ def init_db():
     )
     ''')
 
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS release_windows (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        environment TEXT NOT NULL,
+        start_time TEXT NOT NULL,
+        end_time TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        created_by TEXT NOT NULL,
+        is_enabled INTEGER NOT NULL DEFAULT 1,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    ''')
+
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS change_packages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        package_name TEXT UNIQUE NOT NULL,
+        target_environment TEXT NOT NULL,
+        versions_list TEXT NOT NULL,
+        config_summary TEXT NOT NULL,
+        summary_hash TEXT NOT NULL,
+        created_by TEXT NOT NULL,
+        signoff_status TEXT NOT NULL DEFAULT 'pending',
+        signed_by TEXT,
+        signed_at TIMESTAMP,
+        revoked_by TEXT,
+        revoked_at TIMESTAMP,
+        revoke_reason TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    ''')
+
     cursor.execute("PRAGMA table_info(releases)")
     columns = [col[1] for col in cursor.fetchall()]
     if "conflict_reason" not in columns:
         cursor.execute("ALTER TABLE releases ADD COLUMN conflict_reason TEXT")
     if "approved_by" not in columns:
         cursor.execute("ALTER TABLE releases ADD COLUMN approved_by TEXT")
+    if "window_override_reason" not in columns:
+        cursor.execute("ALTER TABLE releases ADD COLUMN window_override_reason TEXT")
 
     for env in VALID_ENVIRONMENTS:
         cursor.execute(
@@ -286,13 +329,13 @@ def set_current_version(env, version):
         ''', (version, env))
 
 
-def insert_release(version, environment, config_json, status, plan_summary=None, approved_by=None, conflict_reason=None):
+def insert_release(version, environment, config_json, status, plan_summary=None, approved_by=None, conflict_reason=None, window_override_reason=None):
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute('''
             INSERT INTO releases 
-            (version, environment, config_json, status, created_by, plan_summary, approved_by, conflict_reason)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            (version, environment, config_json, status, created_by, plan_summary, approved_by, conflict_reason, window_override_reason)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             version,
             environment,
@@ -301,7 +344,8 @@ def insert_release(version, environment, config_json, status, plan_summary=None,
             get_current_user(),
             plan_summary,
             approved_by,
-            conflict_reason
+            conflict_reason,
+            window_override_reason
         ))
 
 
@@ -1021,3 +1065,849 @@ def delete_preview(version, environment):
             (version, environment)
         )
         return cursor.rowcount > 0
+
+
+def compute_config_summary(versions):
+    """Compute a summary and hash for a list of configuration versions.
+
+    Returns (summary_dict, hash_hex)
+    """
+    summary = []
+    for version in sorted(versions):
+        cfg = get_config(version)
+        if not cfg:
+            raise ValueError(f"Version {version} not found")
+        config_data = json.loads(cfg["config_json"])
+        config_hash = hashlib.sha256(
+            json.dumps(config_data, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        summary.append({
+            "version": version,
+            "config_hash": config_hash,
+            "created_by": cfg["created_by"],
+            "created_at": cfg["created_at"],
+        })
+
+    hash_input = json.dumps([
+        {"version": s["version"], "config_hash": s["config_hash"]}
+        for s in sorted(summary, key=lambda x: x["version"])
+    ], sort_keys=True)
+    summary_hash = hashlib.sha256(hash_input.encode("utf-8")).hexdigest()
+    return summary, summary_hash
+
+
+def create_package(package_name, target_environment, versions, cli_role=None):
+    """Create a new change package.
+
+    Args:
+        package_name: Unique name for the package
+        target_environment: Target environment (dev/staging/prod)
+        versions: List of configuration versions to include
+        cli_role: Optional role override
+
+    Returns:
+        Package dict
+
+    Raises:
+        PackageAlreadyExistsError
+        PackageVersionNotFoundError
+        PermissionDeniedError (for developer creating prod package)
+        EnvironmentError
+    """
+    from .errors import (
+        PackageAlreadyExistsError,
+        PackageVersionNotFoundError,
+        EnvironmentError,
+    )
+
+    if target_environment not in VALID_ENVIRONMENTS:
+        raise EnvironmentError(target_environment, VALID_ENVIRONMENTS)
+
+    if target_environment == "prod":
+        check_permission("package.create.prod", "release-manager", cli_role)
+
+    current_role = get_role(cli_role)
+    if target_environment == "prod" and current_role != "release-manager":
+        check_permission("package.create.prod", "release-manager", cli_role)
+
+    for version in versions:
+        if not config_exists(version):
+            raise PackageVersionNotFoundError(version)
+
+    if package_exists(package_name):
+        raise PackageAlreadyExistsError(package_name)
+
+    config_summary, summary_hash = compute_config_summary(versions)
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO change_packages
+            (package_name, target_environment, versions_list, config_summary, summary_hash,
+             created_by, signoff_status)
+            VALUES (?, ?, ?, ?, ?, ?, 'pending')
+        ''', (
+            package_name,
+            target_environment,
+            json.dumps(sorted(versions)),
+            json.dumps(config_summary),
+            summary_hash,
+            get_current_user(),
+        ))
+        pkg_id = cursor.lastrowid
+
+    log_audit(
+        "package.create",
+        "success",
+        environment=target_environment,
+        details={
+            "package_name": package_name,
+            "versions": versions,
+            "summary_hash": summary_hash,
+            "role": current_role,
+        }
+    )
+
+    return get_package(package_name)
+
+
+def package_exists(package_name):
+    """Check if a package exists."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT 1 FROM change_packages WHERE package_name = ?",
+            (package_name,)
+        )
+        return cursor.fetchone() is not None
+
+
+def get_package(package_name):
+    """Get a package by name. Returns dict or None."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM change_packages WHERE package_name = ?",
+            (package_name,)
+        )
+        row = cursor.fetchone()
+        if row:
+            return _row_to_package_dict(row)
+        return None
+
+
+def get_all_packages(environment=None, limit=100):
+    """Get all packages, optionally filtered by environment."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        if environment:
+            cursor.execute('''
+                SELECT * FROM change_packages
+                WHERE target_environment = ?
+                ORDER BY id DESC LIMIT ?
+            ''', (environment, limit))
+        else:
+            cursor.execute('''
+                SELECT * FROM change_packages
+                ORDER BY id DESC LIMIT ?
+            ''', (limit,))
+        rows = cursor.fetchall()
+        return [_row_to_package_dict(row) for row in rows]
+
+
+def _row_to_package_dict(row):
+    """Convert a package row to a dict with JSON fields parsed."""
+    return {
+        "id": row["id"],
+        "package_name": row["package_name"],
+        "target_environment": row["target_environment"],
+        "versions": json.loads(row["versions_list"]),
+        "config_summary": json.loads(row["config_summary"]),
+        "summary_hash": row["summary_hash"],
+        "created_by": row["created_by"],
+        "signoff_status": row["signoff_status"],
+        "signed_by": row["signed_by"],
+        "signed_at": row["signed_at"],
+        "revoked_by": row["revoked_by"],
+        "revoked_at": row["revoked_at"],
+        "revoke_reason": row["revoke_reason"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def sign_package(package_name, cli_role=None, notes=None):
+    """Sign off a package for release. Only release-manager can sign prod packages.
+
+    Returns True if successful.
+
+    Raises:
+        PackageNotFoundError
+        PackageAlreadySignedError
+        PermissionDeniedError
+    """
+    from .errors import PackageNotFoundError, PackageAlreadySignedError
+
+    pkg = get_package(package_name)
+    if not pkg:
+        raise PackageNotFoundError(package_name)
+
+    if pkg["signoff_status"] == "signed":
+        raise PackageAlreadySignedError(package_name)
+
+    check_permission("package.sign", "release-manager", cli_role)
+
+    if pkg["target_environment"] == "prod":
+        check_permission("package.sign.prod", "release-manager", cli_role)
+
+    current_role = get_role(cli_role)
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            UPDATE change_packages
+            SET signoff_status = 'signed',
+                signed_by = ?,
+                signed_at = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE package_name = ? AND signoff_status != 'signed'
+        ''', (get_current_user(), package_name))
+        if cursor.rowcount == 0:
+            raise PackageAlreadySignedError(package_name)
+
+    log_audit(
+        "package.sign",
+        "success",
+        environment=pkg["target_environment"],
+        details={
+            "package_name": package_name,
+            "versions": pkg["versions"],
+            "signed_by": get_current_user(),
+            "role": current_role,
+            "notes": notes,
+        }
+    )
+
+    return True
+
+
+def revoke_package_signoff(package_name, cli_role=None, reason=None):
+    """Revoke a package signoff. Only release-manager can revoke.
+
+    Returns True if successful.
+
+    Raises:
+        PackageNotFoundError
+        PackageNotSignedForRevokeError
+        PermissionDeniedError
+    """
+    from .errors import PackageNotFoundError, PackageNotSignedForRevokeError
+
+    pkg = get_package(package_name)
+    if not pkg:
+        raise PackageNotFoundError(package_name)
+
+    if pkg["signoff_status"] != "signed":
+        raise PackageNotSignedForRevokeError(package_name)
+
+    check_permission("package.revoke", "release-manager", cli_role)
+
+    current_role = get_role(cli_role)
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            UPDATE change_packages
+            SET signoff_status = 'pending',
+                signed_by = NULL,
+                signed_at = NULL,
+                revoked_by = ?,
+                revoked_at = CURRENT_TIMESTAMP,
+                revoke_reason = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE package_name = ? AND signoff_status = 'signed'
+        ''', (get_current_user(), reason, package_name))
+        if cursor.rowcount == 0:
+            raise PackageNotSignedForRevokeError(package_name)
+
+    log_audit(
+        "package.revoke",
+        "success",
+        environment=pkg["target_environment"],
+        details={
+            "package_name": package_name,
+            "versions": pkg["versions"],
+            "revoked_by": get_current_user(),
+            "role": current_role,
+            "reason": reason,
+        }
+    )
+
+    return True
+
+
+def is_version_in_signed_package(version, environment):
+    """Check if a version is part of a signed package for the given environment.
+
+    Returns the package name if found, None otherwise.
+    """
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT package_name, versions_list FROM change_packages
+            WHERE target_environment = ? AND signoff_status = 'signed'
+            ORDER BY id DESC
+        ''', (environment,))
+        rows = cursor.fetchall()
+        for row in rows:
+            versions = json.loads(row["versions_list"])
+            if version in versions:
+                return row["package_name"]
+        return None
+
+
+def verify_package(package_name):
+    """Verify a package's integrity.
+
+    Checks:
+    1. All versions still exist
+    2. Config content hasn't changed (hash matches)
+
+    Returns (is_valid, issues_list)
+    """
+    from .errors import PackageNotFoundError
+
+    pkg = get_package(package_name)
+    if not pkg:
+        raise PackageNotFoundError(package_name)
+
+    issues = []
+
+    for item in pkg["config_summary"]:
+        version = item["version"]
+        expected_hash = item["config_hash"]
+
+        if not config_exists(version):
+            issues.append(f"Version '{version}' no longer exists in configs")
+            continue
+
+        cfg = get_config(version)
+        config_data = json.loads(cfg["config_json"])
+        actual_hash = hashlib.sha256(
+            json.dumps(config_data, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+
+        if actual_hash != expected_hash:
+            issues.append(
+                f"Version '{version}' content has changed. "
+                f"Expected hash: {expected_hash[:12]}..., "
+                f"Actual: {actual_hash[:12]}..."
+            )
+
+    try:
+        _, actual_summary_hash = compute_config_summary(pkg["versions"])
+        if actual_summary_hash != pkg["summary_hash"]:
+            issues.append(
+                f"Package summary hash mismatch. "
+                f"Expected: {pkg['summary_hash'][:12]}..., "
+                f"Actual: {actual_summary_hash[:12]}..."
+            )
+    except ValueError as e:
+        issues.append(str(e))
+
+    return len(issues) == 0, issues
+
+
+def export_package(package_name):
+    """Export a package to a dict for JSON serialization."""
+    from .errors import PackageNotFoundError
+
+    pkg = get_package(package_name)
+    if not pkg:
+        raise PackageNotFoundError(package_name)
+
+    return {
+        "package_format_version": "1.0",
+        "package_name": pkg["package_name"],
+        "target_environment": pkg["target_environment"],
+        "versions": pkg["versions"],
+        "config_summary": pkg["config_summary"],
+        "summary_hash": pkg["summary_hash"],
+        "created_by": pkg["created_by"],
+        "created_at": pkg["created_at"],
+        "signoff_status": pkg["signoff_status"],
+        "signed_by": pkg["signed_by"],
+        "signed_at": pkg["signed_at"],
+        "_meta": {
+            "exported_at": get_current_time(),
+            "exported_by": get_current_user(),
+        }
+    }
+
+
+def import_package(package_data, cli_role=None, force=False):
+    """Import a package from exported data.
+
+    Args:
+        package_data: Dict from export_package
+        cli_role: Optional role override
+        force: If True, overwrite existing package
+
+    Returns:
+        Imported package dict
+
+    Raises:
+        InvalidPackageFormatError
+        PackageAlreadyExistsError (unless force=True)
+        PackageVersionNotFoundError
+        PackageSummaryMismatchError
+        PermissionDeniedError
+    """
+    from .errors import (
+        InvalidPackageFormatError,
+        PackageAlreadyExistsError,
+        PackageVersionNotFoundError,
+        PackageSummaryMismatchError,
+        EnvironmentError,
+    )
+
+    required_fields = [
+        "package_name", "target_environment", "versions",
+        "config_summary", "summary_hash",
+    ]
+    for field in required_fields:
+        if field not in package_data:
+            raise InvalidPackageFormatError(f"Missing required field: {field}")
+
+    package_name = package_data["package_name"]
+    target_env = package_data["target_environment"]
+    versions = package_data["versions"]
+    expected_hash = package_data["summary_hash"]
+
+    if target_env not in VALID_ENVIRONMENTS:
+        raise EnvironmentError(target_env, VALID_ENVIRONMENTS)
+
+    if package_exists(package_name) and not force:
+        raise PackageAlreadyExistsError(package_name)
+
+    current_role = get_role(cli_role)
+    if target_env == "prod":
+        check_permission("package.import.prod", "release-manager", cli_role)
+
+    for version in versions:
+        if not config_exists(version):
+            log_error(
+                "package.import",
+                "PACKAGE_VERSION_NOT_FOUND",
+                f"Version '{version}' not found for package '{package_name}'",
+                environment=target_env,
+                details={
+                    "package_name": package_name,
+                    "missing_version": version,
+                }
+            )
+            log_audit(
+                "package.import",
+                "failed",
+                environment=target_env,
+                error_reason=f"Version '{version}' not found",
+                details={
+                    "package_name": package_name,
+                    "missing_version": version,
+                    "role": current_role,
+                }
+            )
+            raise PackageVersionNotFoundError(version)
+
+    try:
+        _, actual_hash = compute_config_summary(versions)
+    except ValueError as e:
+        raise PackageVersionNotFoundError(str(e).split("'")[1])
+
+    if actual_hash != expected_hash:
+        log_error(
+            "package.import",
+            "PACKAGE_SUMMARY_MISMATCH",
+            f"Summary hash mismatch for package '{package_name}'",
+            environment=target_env,
+            details={
+                "package_name": package_name,
+                "expected_hash": expected_hash,
+                "actual_hash": actual_hash,
+            }
+        )
+        log_audit(
+            "package.import",
+            "failed",
+            environment=target_env,
+            error_reason=f"Summary hash mismatch for package '{package_name}'",
+            details={
+                "package_name": package_name,
+                "expected_hash": expected_hash,
+                "actual_hash": actual_hash,
+                "role": current_role,
+            }
+        )
+        raise PackageSummaryMismatchError(package_name, expected_hash, actual_hash)
+
+    config_summary = package_data["config_summary"]
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        if package_exists(package_name) and force:
+            cursor.execute('''
+                UPDATE change_packages
+                SET target_environment = ?,
+                    versions_list = ?,
+                    config_summary = ?,
+                    summary_hash = ?,
+                    signoff_status = 'pending',
+                    signed_by = NULL,
+                    signed_at = NULL,
+                    revoked_by = NULL,
+                    revoked_at = NULL,
+                    revoke_reason = NULL,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE package_name = ?
+            ''', (
+                target_env,
+                json.dumps(sorted(versions)),
+                json.dumps(config_summary),
+                expected_hash,
+                package_name,
+            ))
+        else:
+            cursor.execute('''
+                INSERT INTO change_packages
+                (package_name, target_environment, versions_list, config_summary, summary_hash,
+                 created_by, signoff_status)
+                VALUES (?, ?, ?, ?, ?, ?, 'pending')
+            ''', (
+                package_name,
+                target_env,
+                json.dumps(sorted(versions)),
+                json.dumps(config_summary),
+                expected_hash,
+                get_current_user(),
+            ))
+
+    log_audit(
+        "package.import",
+        "success",
+        environment=target_env,
+        details={
+            "package_name": package_name,
+            "versions": versions,
+            "summary_hash": expected_hash,
+            "role": current_role,
+            "force": force,
+        }
+    )
+
+    return get_package(package_name)
+
+
+def requires_package_signoff(environment):
+    """Check if an environment requires package signoff for releases."""
+    return environment == "prod"
+
+
+def check_package_signoff(version, environment):
+    """Check if a version has valid package signoff for the environment.
+
+    Returns (is_valid, package_name_or_None, error_message_or_None)
+    """
+    if not requires_package_signoff(environment):
+        return True, None, None
+
+    package_name = is_version_in_signed_package(version, environment)
+    if not package_name:
+        return False, None, f"Version '{version}' must be in a signed package for {environment}"
+
+    is_valid, issues = verify_package(package_name)
+    if not is_valid:
+        return False, package_name, f"Package '{package_name}' verification failed: {'; '.join(issues)}"
+
+    return True, package_name, None
+
+
+def parse_datetime(dt_str):
+    """Parse datetime string in ISO format."""
+    try:
+        return datetime.fromisoformat(dt_str)
+    except ValueError:
+        raise InvalidWindowTimeError(f"Invalid datetime format: {dt_str}. Expected ISO format (e.g., 2024-01-01T12:00:00)")
+
+
+def validate_window_times(start_time_str, end_time_str):
+    """Validate window start and end times."""
+    start_time = parse_datetime(start_time_str)
+    end_time = parse_datetime(end_time_str)
+    
+    if end_time <= start_time:
+        raise InvalidWindowTimeError(f"End time ({end_time_str}) must be after start time ({start_time_str})")
+    
+    return start_time, end_time
+
+
+def get_overlapping_windows(environment, start_time_str, end_time_str, exclude_window_id=None):
+    """Find overlapping windows for an environment."""
+    start_time, end_time = validate_window_times(start_time_str, end_time_str)
+    
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        query = '''
+            SELECT * FROM release_windows 
+            WHERE environment = ? AND is_enabled = 1
+        '''
+        params = [environment]
+        
+        if exclude_window_id is not None:
+            query += " AND id != ?"
+            params.append(exclude_window_id)
+        
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+        
+        overlapping = []
+        for row in rows:
+            w_start = parse_datetime(row["start_time"])
+            w_end = parse_datetime(row["end_time"])
+            
+            if not (end_time <= w_start or start_time >= w_end):
+                overlapping.append(dict(row))
+        
+        return overlapping
+
+
+def create_release_window(environment, start_time_str, end_time_str, reason, cli_role=None):
+    """Create a new release window (closes the window for releases)."""
+    if environment not in VALID_ENVIRONMENTS:
+        raise EnvironmentError(environment, VALID_ENVIRONMENTS)
+    
+    if environment == "prod":
+        check_permission("create_release_window", "release-manager", cli_role)
+    
+    overlapping = get_overlapping_windows(environment, start_time_str, end_time_str)
+    if overlapping:
+        raise OverlappingWindowError(environment, overlapping)
+    
+    validate_window_times(start_time_str, end_time_str)
+    
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO release_windows 
+            (environment, start_time, end_time, reason, created_by)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (
+            environment,
+            start_time_str,
+            end_time_str,
+            reason,
+            get_current_user()
+        ))
+        window_id = cursor.lastrowid
+    
+    log_audit(
+        "create_release_window",
+        "success",
+        environment=environment,
+        details={
+            "window_id": window_id,
+            "start_time": start_time_str,
+            "end_time": end_time_str,
+            "reason": reason
+        }
+    )
+    
+    return window_id
+
+
+def disable_release_window(window_id, cli_role=None):
+    """Disable (re-open) a release window."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM release_windows WHERE id = ?", (window_id,))
+        row = cursor.fetchone()
+        
+        if not row:
+            raise WindowNotFoundError(window_id)
+        
+        environment = row["environment"]
+        is_enabled = row["is_enabled"] == 1
+        
+        if not is_enabled:
+            log_audit(
+                "disable_release_window",
+                "failed",
+                environment=environment,
+                error_reason=f"Window {window_id} is already disabled",
+                details={"window_id": window_id}
+            )
+            return False
+        
+        if environment == "prod":
+            check_permission("disable_release_window", "release-manager", cli_role)
+        
+        cursor.execute('''
+            UPDATE release_windows 
+            SET is_enabled = 0, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        ''', (window_id,))
+    
+    log_audit(
+        "disable_release_window",
+        "success",
+        environment=environment,
+        details={"window_id": window_id}
+    )
+    
+    return True
+
+
+def get_release_window(window_id):
+    """Get a release window by ID."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM release_windows WHERE id = ?", (window_id,))
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+
+def get_all_release_windows(environment=None, include_disabled=False):
+    """Get all release windows, optionally filtered by environment."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        query = "SELECT * FROM release_windows WHERE 1=1"
+        params = []
+        
+        if environment is not None:
+            query += " AND environment = ?"
+            params.append(environment)
+        
+        if not include_disabled:
+            query += " AND is_enabled = 1"
+        
+        query += " ORDER BY start_time ASC"
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+        return [dict(row) for row in rows]
+
+
+def get_active_release_window(environment):
+    """Check if the given environment has an active (closed) release window at current time.
+    
+    Returns the active window dict if closed, None otherwise.
+    """
+    now = datetime.now()
+    now_str = now.isoformat()
+    
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT * FROM release_windows 
+            WHERE environment = ? AND is_enabled = 1
+            AND start_time <= ? AND end_time >= ?
+            ORDER BY start_time ASC
+        ''', (environment, now_str, now_str))
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+
+def check_release_window(environment, version=None, override=False, override_reason=None, cli_role=None, action="apply"):
+    """Check if release window is closed for an environment.
+    
+    Returns (can_proceed, window_info, override_info)
+    - can_proceed: True if release can proceed (window open or override allowed)
+    - window_info: The closed window dict if window is closed, None otherwise
+    - override_info: Dict with override details if override was used, None otherwise
+    
+    Raises:
+    - ReleaseWindowError: If window is closed and no override
+    - OverridePermissionDeniedError: If override attempted without permission
+    """
+    window_info = get_active_release_window(environment)
+    
+    if not window_info:
+        return True, None, None
+    
+    if override:
+        current_role = get_role(cli_role)
+        if current_role != "release-manager":
+            err = OverridePermissionDeniedError(action, "release-manager", current_role)
+            log_error(
+                action,
+                err.code,
+                err.message,
+                environment=environment,
+                version=version,
+                details={
+                    "window_id": window_info["id"],
+                    "override_attempted": True,
+                    "role": current_role
+                }
+            )
+            log_audit(
+                action,
+                "window_override_denied",
+                environment=environment,
+                version=version,
+                error_reason=err.message,
+                details={
+                    "window_id": window_info["id"],
+                    "window_reason": window_info["reason"],
+                    "override_reason": override_reason,
+                    "role": current_role
+                }
+            )
+            raise err
+        
+        if not override_reason:
+            raise InvalidWindowTimeError("Override reason is required when using --override-window")
+        
+        override_info = {
+            "override_reason": override_reason,
+            "overridden_by": get_current_user(),
+            "window_id": window_info["id"],
+            "window_reason": window_info["reason"]
+        }
+        
+        log_audit(
+            action,
+            "window_overridden",
+            environment=environment,
+            version=version,
+            details=override_info
+        )
+        
+        return True, window_info, override_info
+    
+    err = ReleaseWindowError(environment, window_info)
+    log_error(
+        action,
+        err.code,
+        err.message,
+        environment=environment,
+        version=version,
+        details={
+            "window_id": window_info["id"],
+            "window_reason": window_info["reason"],
+            "start_time": window_info["start_time"],
+            "end_time": window_info["end_time"]
+        }
+    )
+    log_audit(
+        action,
+        "window_blocked",
+        environment=environment,
+        version=version,
+        error_reason=err.message,
+        details={
+            "window_id": window_info["id"],
+            "window_reason": window_info["reason"],
+            "start_time": window_info["start_time"],
+            "end_time": window_info["end_time"]
+        }
+    )
+    raise err
