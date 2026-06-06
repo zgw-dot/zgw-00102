@@ -188,3 +188,60 @@ class PreviewNoChangesError(PipelineError):
     def __init__(self):
         message = "Preview shows no changes between current and target configuration"
         super().__init__(message, code="PREVIEW_NO_CHANGES")
+
+
+class BatchNotFoundError(PipelineError):
+    """Batch not found error"""
+    def __init__(self, batch_id=None, batch_name=None):
+        self.batch_id = batch_id
+        self.batch_name = batch_name
+        if batch_name:
+            message = f"Batch '{batch_name}' not found"
+        elif batch_id:
+            message = f"Batch #{batch_id} not found"
+        else:
+            message = "Batch not found"
+        super().__init__(message, code="BATCH_NOT_FOUND")
+
+
+class BatchNameExistsError(PipelineError):
+    """Batch name already exists error"""
+    def __init__(self, batch_name):
+        self.batch_name = batch_name
+        message = f"Batch name '{batch_name}' already exists"
+        super().__init__(message, code="BATCH_NAME_EXISTS")
+
+
+class BatchEmptyError(PipelineError):
+    """Batch has no steps error"""
+    def __init__(self, batch_name=None):
+        message = f"Batch '{batch_name}' has no steps" if batch_name else "Batch has no steps"
+        super().__init__(message, code="BATCH_EMPTY")
+
+
+class BatchStepInvalidError(PipelineError):
+    """Batch step is invalid error"""
+    def __init__(self, step_index, reason):
+        self.step_index = step_index
+        self.reason = reason
+        message = f"Invalid step at index {step_index}: {reason}"
+        super().__init__(message, code="BATCH_STEP_INVALID")
+
+
+class BatchImportConflictError(PipelineError):
+    """Batch import conflict error"""
+    def __init__(self, conflicts):
+        self.conflicts = conflicts
+        conflict_str = "\n  - ".join(conflicts)
+        message = f"Batch import conflicts detected:\n  - {conflict_str}\nUse --force to override."
+        super().__init__(message, code="BATCH_IMPORT_CONFLICT")
+
+
+class BatchStepStateConflictError(PipelineError):
+    """Batch step state conflicts with existing database state"""
+    def __init__(self, step_index, batch_name, reason):
+        self.step_index = step_index
+        self.batch_name = batch_name
+        self.reason = reason
+        message = f"Step {step_index} in batch '{batch_name}' has state conflict: {reason}"
+        super().__init__(message, code="BATCH_STEP_STATE_CONFLICT")

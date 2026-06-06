@@ -14,6 +14,7 @@ from .commands.approve_cmd import approve, reject
 from .commands.pending_cmd import pending_request, pending_list
 from .commands.snapshot_cmd import snapshot
 from .commands.preview_cmd import preview
+from .commands.batch_cmd import batch
 from .utils import PipelineNotInitializedError
 
 
@@ -41,6 +42,7 @@ cli.add_command(pending_request, name="pending")
 cli.add_command(pending_list, name="pending-list")
 cli.add_command(snapshot, name="snapshot")
 cli.add_command(preview, name="preview")
+cli.add_command(batch, name="batch")
 
 
 def main():

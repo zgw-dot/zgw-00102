@@ -1,0 +1,38 @@
+{
+  "batch_export_version": "1.0",
+  "exported_at": "2026-06-06T16:48:53.464579",
+  "exported_by": "13623",
+  "batch": {
+    "name": "test-failure",
+    "description": null,
+    "notes": null,
+    "status": "failed",
+    "created_by": "13623",
+    "created_at": "2026-06-06 08:48:50",
+    "started_at": "2026-06-06T16:48:52.707211",
+    "completed_at": "2026-06-06T16:48:52.805804"
+  },
+  "steps": [
+    {
+      "step_index": 0,
+      "environment": "dev",
+      "version": "1.0.0",
+      "status": "failed",
+      "error_reason": "Version 1.0.0 already exists in dev environment"
+    },
+    {
+      "step_index": 1,
+      "environment": "staging",
+      "version": "1.0.0",
+      "status": "skipped",
+      "error_reason": null
+    },
+    {
+      "step_index": 2,
+      "environment": "prod",
+      "version": "1.0.0",
+      "status": "skipped",
+      "error_reason": null
+    }
+  ]
+}

@@ -21,6 +21,12 @@
 - **lock-status**: 查看环境锁定状态
 - **preview**: 发布预演，在 apply 前查看变更、审批要求、锁定状态
 - **preview show**: 查看历史预演结果（支持跨重启）
+- **batch create**: 创建发布批次，串起多环境多版本发布
+- **batch list**: 查看所有发布批次
+- **batch show**: 查看批次详情和每一步状态
+- **batch apply**: 按顺序执行批次步骤（支持跨重启继续）
+- **batch export**: 导出批次为 JSON
+- **batch import**: 导入批次到新库（支持 --force 覆盖冲突）
 
 ## 核心约束
 
@@ -96,7 +102,34 @@ python pipeline.py plan 1.0.0 prod
 python pipeline.py plan 2.0.0 staging
 ```
 
-### 5. 发布预演（Preview）
+### 5. 发布批次（Batch）
+```bash
+# 创建批次，按顺序发布 dev -> staging -> prod
+python pipeline.py batch create release-v1 dev:1.0.0 staging:1.0.0 prod:1.0.0 --notes "v1 正式版本上线"
+
+# 查看所有批次
+python pipeline.py batch list
+
+# 查看批次详情
+python pipeline.py batch show release-v1
+
+# 执行批次（遇到错误会停止，已成功步骤保留）
+python pipeline.py batch apply release-v1 --yes
+
+# 遇到 staging 锁定，解锁后重试失败步骤
+python pipeline.py batch apply release-v1 --yes --retry
+
+# 导出批次为 JSON
+python pipeline.py batch export release-v1 -o release-v1-batch.json
+
+# 导入批次到新库
+python pipeline.py batch import release-v1-batch.json --role release-manager
+
+# 强制覆盖导入冲突
+python pipeline.py batch import release-v1-batch.json --role release-manager --force
+```
+
+### 6. 发布预演（Preview）
 ```bash
 # 预演发布 2.0.0 到 dev
 python pipeline.py preview run 2.0.0 dev
@@ -115,7 +148,7 @@ python pipeline.py apply --from-preview 2.0.0 dev --yes
 python pipeline.py apply --from-preview 2.0.0 dev --yes --ack-drift
 ```
 
-### 6. 审批与发布（Prod 环境）
+### 7. 审批与发布（Prod 环境）
 ```bash
 # 先发布到 staging（必经过渡）
 python pipeline.py apply 1.0.0 staging --yes
@@ -136,7 +169,7 @@ python pipeline.py apply 1.0.0 prod --role release-manager --yes
 python pipeline.py apply 2.0.0 staging --yes
 ```
 
-### 7. 环境锁定与解锁
+### 8. 环境锁定与解锁
 ```bash
 # 锁定 prod 环境（release-manager 角色）
 python pipeline.py lock prod --role release-manager --reason "紧急维护中"
@@ -154,7 +187,7 @@ python pipeline.py unlock prod --role release-manager
 python pipeline.py rollback prod 1.0.0 --reason "回滚到稳定版本" --yes
 ```
 
-### 8. 查看历史
+### 9. 查看历史
 ```bash
 # 查看全部历史
 python pipeline.py history
@@ -166,13 +199,13 @@ python pipeline.py history --env staging
 python pipeline.py history --type releases
 ```
 
-### 9. 回滚
+### 10. 回滚
 ```bash
 # 回滚 staging 到 1.0.0
 python pipeline.py rollback staging 1.0.0 --reason "feature rollback" --yes
 ```
 
-### 10. 导出审计数据
+### 11. 导出审计数据
 ```bash
 # 导出为 JSON
 python pipeline.py export --output audit.json --format json
@@ -332,6 +365,57 @@ python pipeline.py apply --from-preview 2.0.0 prod --yes --ack-drift --role deve
 ---
 
 ## ✅ 完整验证链路
+
+### 链路 0: 批次最短验证路径（5 步搞定）
+```bash
+# 1. 初始化
+rm -f pipeline.db
+python pipeline.py init
+
+# 2. 导入配置
+python pipeline.py import config_pipeline/examples/config_v1.json
+python pipeline.py import config_pipeline/examples/config_v2.json
+
+# 3. 创建批次（dev -> staging 发布 1.0.0）
+python pipeline.py batch create quick-batch dev:1.0.0 staging:1.0.0 --notes "快速验证"
+
+# 4. 查看批次详情
+python pipeline.py batch show quick-batch
+
+# 5. 执行批次
+python pipeline.py batch apply quick-batch --yes
+
+# 验证：两步都应为 SUCCESS
+python pipeline.py batch show quick-batch
+```
+
+**进阶：跨重启继续执行**
+```bash
+# 第一步：创建带失败的批次
+python pipeline.py batch create resume-batch dev:1.0.0 staging:2.0.0
+python pipeline.py lock staging --role release-manager --reason "测试"
+python pipeline.py batch apply resume-batch --yes  # 第一步成功，第二步失败
+
+# 关闭终端，重新打开
+# 第二步：解锁并重试
+python pipeline.py unlock staging --role release-manager
+python pipeline.py batch apply resume-batch --yes --retry
+
+# 验证：两步都成功
+python pipeline.py batch show resume-batch
+```
+
+**进阶：导入导出**
+```bash
+# 导出批次
+python pipeline.py batch export quick-batch -o quick-batch.json
+
+# 新环境导入
+rm -f pipeline.db
+python pipeline.py init
+python pipeline.py import config_pipeline/examples/config_v1.json
+python pipeline.py batch import quick-batch.json --role release-manager
+```
 
 ### 链路 1: 成功审批发布（完整流程）
 ```bash
@@ -627,7 +711,8 @@ python pipeline.py lock-status
     │   ├── lock_cmd.py         # lock/unlock/lock-status 命令
     │   ├── approve_cmd.py      # approve/reject 命令
     │   ├── pending_cmd.py      # pending/pending-list 命令
-    │   └── preview_cmd.py      # preview/preview show 命令（发布预演和漂移检查）
+    │   ├── preview_cmd.py      # preview/preview show 命令（发布预演和漂移检查）
+    │   └── batch_cmd.py        # batch 命令（发布批次：create/list/show/apply/export/import）
     ├── utils/
     │   ├── __init__.py
     │   ├── errors.py           # 错误定义
@@ -651,6 +736,8 @@ python pipeline.py lock-status
 - `environment_locks`: 环境锁定状态（锁定原因、锁定人、冲突原因）
 - `approvals`: 审批记录（待审批/已审批/已拒绝，审批人、冲突原因）
 - `previews`: 发布预演记录（包含目标配置快照、环境指针快照、锁状态快照、审批状态快照、变更摘要）
+- `batches`: 发布批次（名称、描述、状态、操作者、备注）
+- `batch_steps`: 批次步骤（环境、版本、状态、错误原因、release_id）
 
 ## 审计导出内容
 

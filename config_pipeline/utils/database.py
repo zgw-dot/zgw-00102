@@ -18,6 +18,9 @@ ROLE_ENV_VAR = "PIPELINE_ROLE"
 APPROVAL_REQUIRED_ENVS = ["prod"]
 REQUIRED_KEYS = ["app_name", "version", "features", "database", "api_endpoints"]
 
+BATCH_STATUSES = ["pending", "running", "success", "failed", "partial"]
+STEP_STATUSES = ["pending", "running", "success", "failed", "skipped"]
+
 DB_FILENAME = "pipeline.db"
 
 
@@ -174,6 +177,38 @@ def init_db():
         created_by TEXT NOT NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         UNIQUE(version, environment)
+    )
+    ''')
+
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS batches (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT UNIQUE NOT NULL,
+        description TEXT,
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_by TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        started_at TIMESTAMP,
+        completed_at TIMESTAMP,
+        notes TEXT
+    )
+    ''')
+
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS batch_steps (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        batch_id INTEGER NOT NULL,
+        step_index INTEGER NOT NULL,
+        environment TEXT NOT NULL,
+        version TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        error_reason TEXT,
+        release_id INTEGER,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (batch_id) REFERENCES batches(id) ON DELETE CASCADE,
+        UNIQUE(batch_id, step_index)
     )
     ''')
 
@@ -1021,3 +1056,387 @@ def delete_preview(version, environment):
             (version, environment)
         )
         return cursor.rowcount > 0
+
+
+def create_batch(name, description=None, notes=None):
+    """Create a new batch."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute('''
+                INSERT INTO batches (name, description, notes, created_by)
+                VALUES (?, ?, ?, ?)
+            ''', (name, description, notes, get_current_user()))
+            return cursor.lastrowid
+        except sqlite3.IntegrityError:
+            return None
+
+
+def get_batch(batch_id=None, batch_name=None):
+    """Get a batch by ID or name."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        if batch_id is not None:
+            cursor.execute("SELECT * FROM batches WHERE id = ?", (batch_id,))
+        elif batch_name is not None:
+            cursor.execute("SELECT * FROM batches WHERE name = ?", (batch_name,))
+        else:
+            return None
+        row = cursor.fetchone()
+        if row:
+            batch = dict(row)
+            batch["steps"] = get_batch_steps(batch["id"])
+            return batch
+        return None
+
+
+def get_all_batches(limit=100):
+    """Get all batches, most recent first."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM batches ORDER BY id DESC LIMIT ?", (limit,))
+        rows = cursor.fetchall()
+        batches = []
+        for row in rows:
+            batch = dict(row)
+            batch["steps"] = get_batch_steps(batch["id"])
+            batches.append(batch)
+        return batches
+
+
+def batch_name_exists(name):
+    """Check if a batch name already exists."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1 FROM batches WHERE name = ?", (name,))
+        return cursor.fetchone() is not None
+
+
+def update_batch_status(batch_id, status, started_at=None, completed_at=None):
+    """Update batch status."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        updates = ["status = ?", "updated_at = CURRENT_TIMESTAMP"]
+        params = [status]
+        if started_at:
+            updates.append("started_at = ?")
+            params.append(started_at)
+        if completed_at:
+            updates.append("completed_at = ?")
+            params.append(completed_at)
+        params.append(batch_id)
+        cursor.execute(
+            f"UPDATE batches SET {', '.join(updates)} WHERE id = ?",
+            params
+        )
+        return cursor.rowcount > 0
+
+
+def update_batch_notes(batch_id, notes):
+    """Update batch notes."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            UPDATE batches SET notes = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        ''', (notes, batch_id))
+        return cursor.rowcount > 0
+
+
+def create_batch_step(batch_id, step_index, environment, version):
+    """Create a batch step."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute('''
+                INSERT INTO batch_steps (batch_id, step_index, environment, version)
+                VALUES (?, ?, ?, ?)
+            ''', (batch_id, step_index, environment, version))
+            return cursor.lastrowid
+        except sqlite3.IntegrityError:
+            return None
+
+
+def get_batch_steps(batch_id):
+    """Get all steps for a batch, ordered by step index."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT * FROM batch_steps WHERE batch_id = ? ORDER BY step_index
+        ''', (batch_id,))
+        rows = cursor.fetchall()
+        return [dict(row) for row in rows]
+
+
+def get_batch_step(step_id):
+    """Get a specific batch step by ID."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM batch_steps WHERE id = ?", (step_id,))
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+
+def update_batch_step(step_id, status, error_reason=None, release_id=None):
+    """Update batch step status and error reason."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        updates = ["status = ?", "updated_at = CURRENT_TIMESTAMP"]
+        params = [status]
+        if error_reason is not None:
+            updates.append("error_reason = ?")
+            params.append(error_reason)
+        if release_id is not None:
+            updates.append("release_id = ?")
+            params.append(release_id)
+        params.append(step_id)
+        cursor.execute(
+            f"UPDATE batch_steps SET {', '.join(updates)} WHERE id = ?",
+            params
+        )
+        return cursor.rowcount > 0
+
+
+def reset_failed_batch_steps(batch_id):
+    """Reset failed and skipped steps to pending for retry.
+    
+    Returns the number of steps reset.
+    """
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            UPDATE batch_steps
+            SET status = 'pending', error_reason = NULL, release_id = NULL,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE batch_id = ? AND status IN ('failed', 'skipped')
+        ''', (batch_id,))
+        return cursor.rowcount
+
+
+def get_first_pending_step(batch_id):
+    """Get the first pending step for a batch."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT * FROM batch_steps
+            WHERE batch_id = ? AND status = 'pending'
+            ORDER BY step_index LIMIT 1
+        ''', (batch_id,))
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+
+def set_remaining_steps_skipped(batch_id, from_step_index):
+    """Set all remaining steps (after failed step) to skipped."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            UPDATE batch_steps
+            SET status = 'skipped', updated_at = CURRENT_TIMESTAMP
+            WHERE batch_id = ? AND step_index > ? AND status = 'pending'
+        ''', (batch_id, from_step_index))
+        return cursor.rowcount
+
+
+def compute_batch_status(batch_id):
+    """Compute overall batch status based on step states."""
+    steps = get_batch_steps(batch_id)
+    if not steps:
+        return "pending"
+
+    status_counts = {}
+    for s in steps:
+        status_counts[s["status"]] = status_counts.get(s["status"], 0) + 1
+
+    if status_counts.get("failed", 0) > 0:
+        if status_counts.get("success", 0) > 0:
+            return "partial"
+        return "failed"
+    if status_counts.get("success", 0) == len(steps):
+        return "success"
+    if status_counts.get("running", 0) > 0:
+        return "running"
+    return "pending"
+
+
+def export_batch(batch_id):
+    """Export a batch and its steps to a JSON-serializable dict."""
+    batch = get_batch(batch_id)
+    if not batch:
+        return None
+
+    steps = []
+    for step in batch["steps"]:
+        steps.append({
+            "step_index": step["step_index"],
+            "environment": step["environment"],
+            "version": step["version"],
+            "status": step["status"],
+            "error_reason": step["error_reason"],
+        })
+
+    return {
+        "batch_export_version": "1.0",
+        "exported_at": get_current_time(),
+        "exported_by": get_current_user(),
+        "batch": {
+            "name": batch["name"],
+            "description": batch["description"],
+            "notes": batch["notes"],
+            "status": batch["status"],
+            "created_by": batch["created_by"],
+            "created_at": batch["created_at"],
+            "started_at": batch["started_at"],
+            "completed_at": batch["completed_at"],
+        },
+        "steps": steps,
+    }
+
+
+def check_batch_import_conflicts(export_data, force=False):
+    """Check for conflicts when importing a batch.
+    
+    Returns (conflicts, state_conflicts) lists.
+    """
+    conflicts = []
+    state_conflicts = []
+
+    batch_data = export_data.get("batch", {})
+    batch_name = batch_data.get("name")
+    steps_data = export_data.get("steps", [])
+
+    if batch_name and batch_name_exists(batch_name):
+        conflicts.append(f"Batch name '{batch_name}' already exists")
+
+    for step in steps_data:
+        status = step.get("status")
+        env = step.get("environment")
+        version = step.get("version")
+
+        if status == "success":
+            if not has_successful_release(version, env):
+                state_conflicts.append(
+                    f"Step {step['step_index']} ({version} -> {env}): marked success but "
+                    f"no successful release exists in database"
+                )
+        elif status == "failed":
+            if has_successful_release(version, env):
+                state_conflicts.append(
+                    f"Step {step['step_index']} ({version} -> {env}): marked failed but "
+                    f"successful release exists in database"
+                )
+
+    return conflicts, state_conflicts
+
+
+def import_batch(export_data, force=False, role=None):
+    """Import a batch from exported JSON data.
+    
+    Returns (success, message, details).
+    """
+    batch_data = export_data.get("batch", {})
+    batch_name = batch_data.get("name")
+    steps_data = export_data.get("steps", [])
+
+    if not batch_name:
+        return False, "Batch name is required in export data", {}
+
+    if not steps_data:
+        return False, "Batch has no steps to import", {}
+
+    current_role = role or get_role()
+    is_release_manager = current_role == "release-manager"
+
+    prod_state_restore = any(
+        s.get("environment") == "prod" and s.get("status") in ("success", "failed")
+        for s in steps_data
+    )
+    prod_approval_restore = any(
+        s.get("environment") == "prod" for s in steps_data
+    )
+
+    if (prod_state_restore or prod_approval_restore) and not is_release_manager:
+        return False, (
+            "Permission denied: importing batches with prod environment state "
+            "requires release-manager role"
+        ), {}
+
+    conflicts, state_conflicts = check_batch_import_conflicts(export_data)
+
+    if conflicts and not force:
+        return False, f"Import conflicts: {'; '.join(conflicts)}", {"conflicts": conflicts}
+
+    if state_conflicts and not force:
+        return False, f"State conflicts: {'; '.join(state_conflicts)}", {"state_conflicts": state_conflicts}
+
+    details = {
+        "conflicts_overridden": conflicts if force else [],
+        "state_conflicts_overridden": state_conflicts if force else [],
+        "steps_imported": 0,
+    }
+
+    conn = None
+    try:
+        db_path = get_db_path()
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("BEGIN IMMEDIATE")
+
+        if force and batch_name_exists(batch_name):
+            cursor.execute("DELETE FROM batch_steps WHERE batch_id IN (SELECT id FROM batches WHERE name = ?)", (batch_name,))
+            cursor.execute("DELETE FROM batches WHERE name = ?", (batch_name,))
+
+        cursor.execute('''
+            INSERT INTO batches (name, description, status, notes, created_by, 
+                                created_at, started_at, completed_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            batch_name,
+            batch_data.get("description"),
+            batch_data.get("status", "pending"),
+            batch_data.get("notes"),
+            batch_data.get("created_by", get_current_user()),
+            batch_data.get("created_at"),
+            batch_data.get("started_at"),
+            batch_data.get("completed_at"),
+        ))
+        batch_id = cursor.lastrowid
+
+        for step in sorted(steps_data, key=lambda s: s["step_index"]):
+            cursor.execute('''
+                INSERT INTO batch_steps (batch_id, step_index, environment, version, status, error_reason)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (
+                batch_id,
+                step["step_index"],
+                step["environment"],
+                step["version"],
+                step.get("status", "pending"),
+                step.get("error_reason"),
+            ))
+            details["steps_imported"] += 1
+
+        conn.commit()
+
+        log_audit(
+            "batch_import",
+            "success",
+            details={"batch_name": batch_name, "force": force, "role": current_role, **details}
+        )
+
+        return True, f"Batch '{batch_name}' imported successfully", details
+
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        log_error(
+            "batch_import",
+            "IMPORT_ERROR",
+            str(e),
+            details={"batch_name": batch_name, "force": force}
+        )
+        raise
+    finally:
+        if conn:
+            conn.close()
