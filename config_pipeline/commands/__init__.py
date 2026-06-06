@@ -6,6 +6,7 @@ from . import apply_cmd
 from . import history_cmd
 from . import rollback_cmd
 from . import export_cmd
+from . import snapshot_cmd
 
 __all__ = [
     "init_cmd",
@@ -16,4 +17,5 @@ __all__ = [
     "history_cmd",
     "rollback_cmd",
     "export_cmd",
+    "snapshot_cmd",
 ]

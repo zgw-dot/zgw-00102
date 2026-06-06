@@ -60,6 +60,10 @@ from .database import (
     approve_version,
     reject_approval,
     set_release_conflict_reason,
+    get_all_configs,
+    get_snapshot_data,
+    check_snapshot_conflicts,
+    import_snapshot,
 )
 from .diff import compute_diff, has_changes, format_diff, generate_plan_summary
 
@@ -123,6 +127,10 @@ __all__ = [
     "approve_version",
     "reject_approval",
     "set_release_conflict_reason",
+    "get_all_configs",
+    "get_snapshot_data",
+    "check_snapshot_conflicts",
+    "import_snapshot",
     "compute_diff",
     "has_changes",
     "format_diff",

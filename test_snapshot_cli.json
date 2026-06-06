@@ -1,0 +1,141 @@
+{
+  "snapshot_metadata": {
+    "snapshot_version": "1.0",
+    "exported_at": "2026-06-06T14:16:22.755167",
+    "exported_by": "13623"
+  },
+  "configs": [
+    {
+      "version": "1.0.0",
+      "config_json": {
+        "app_name": "myapp",
+        "version": "1.0.0",
+        "features": {
+          "auth": true,
+          "notifications": true,
+          "dark_mode": false
+        },
+        "database": {
+          "host": "localhost",
+          "port": 5432,
+          "name": "myapp_dev",
+          "pool_size": 10
+        },
+        "api_endpoints": [
+          {
+            "path": "/api/v1/users",
+            "method": "GET",
+            "rate_limit": 100
+          },
+          {
+            "path": "/api/v1/orders",
+            "method": "POST",
+            "rate_limit": 50
+          }
+        ],
+        "metadata": {
+          "description": "Initial configuration for myapp",
+          "team": "platform"
+        }
+      },
+      "created_by": "13623",
+      "created_at": "2026-06-06 06:14:49"
+    },
+    {
+      "version": "2.0.0",
+      "config_json": {
+        "app_name": "myapp",
+        "version": "2.0.0",
+        "features": {
+          "auth": true,
+          "notifications": true,
+          "dark_mode": true,
+          "analytics": true
+        },
+        "database": {
+          "host": "db.example.com",
+          "port": 5432,
+          "name": "myapp_prod",
+          "pool_size": 20,
+          "timeout": 30
+        },
+        "api_endpoints": [
+          {
+            "path": "/api/v1/users",
+            "method": "GET",
+            "rate_limit": 200
+          },
+          {
+            "path": "/api/v1/orders",
+            "method": "POST",
+            "rate_limit": 100
+          },
+          {
+            "path": "/api/v2/analytics",
+            "method": "GET",
+            "rate_limit": 50
+          }
+        ],
+        "metadata": {
+          "description": "Updated configuration with analytics feature",
+          "team": "platform",
+          "release_date": "2026-06-01"
+        }
+      },
+      "created_by": "13623",
+      "created_at": "2026-06-06 06:14:50"
+    }
+  ],
+  "environments": [
+    {
+      "name": "dev",
+      "current_version": "1.0.0",
+      "updated_at": "2026-06-06 06:15:31"
+    },
+    {
+      "name": "prod",
+      "current_version": null,
+      "updated_at": "2026-06-06 06:14:37"
+    },
+    {
+      "name": "staging",
+      "current_version": "1.0.0",
+      "updated_at": "2026-06-06 06:16:13"
+    }
+  ],
+  "approvals": [
+    {
+      "version": "1.0.0",
+      "environment": "prod",
+      "status": "pending",
+      "requested_by": "13623",
+      "requested_at": "2026-06-06 06:16:13",
+      "approved_by": null,
+      "approved_at": null,
+      "notes": "Test pending approval"
+    }
+  ],
+  "environment_locks": [
+    {
+      "environment": "dev",
+      "is_locked": false,
+      "lock_reason": null,
+      "locked_by": null,
+      "locked_at": null
+    },
+    {
+      "environment": "prod",
+      "is_locked": true,
+      "lock_reason": "Snapshot test lock",
+      "locked_by": "13623",
+      "locked_at": "2026-06-06 06:16:03"
+    },
+    {
+      "environment": "staging",
+      "is_locked": false,
+      "lock_reason": null,
+      "locked_by": null,
+      "locked_at": null
+    }
+  ]
+}
