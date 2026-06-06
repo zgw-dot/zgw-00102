@@ -385,3 +385,132 @@ class ArchiveImportConflictError(PipelineError):
         self.archive_name = archive_name
         message = f"Archive '{archive_name}' already exists. Use --force to overwrite."
         super().__init__(message, code="ARCHIVE_IMPORT_CONFLICT")
+
+
+class RiskAssessmentNotFoundError(PipelineError):
+    """Risk assessment not found error"""
+    def __init__(self, risk_id=None, version=None, environment=None):
+        self.risk_id = risk_id
+        self.version = version
+        self.environment = environment
+        if risk_id:
+            message = f"Risk assessment with ID '{risk_id}' not found"
+        else:
+            message = f"No risk assessment found for version '{version}' in environment '{environment}'"
+        super().__init__(message, code="RISK_ASSESSMENT_NOT_FOUND")
+
+
+class RiskAssessmentAlreadyExistsError(PipelineError):
+    """Risk assessment already exists error"""
+    def __init__(self, version, environment):
+        self.version = version
+        self.environment = environment
+        message = f"Risk assessment for version '{version}' in environment '{environment}' already exists. Rescan to update."
+        super().__init__(message, code="RISK_ASSESSMENT_ALREADY_EXISTS")
+
+
+class RiskBlockedReleaseError(PipelineError):
+    """Risk assessment blocks release error"""
+    def __init__(self, version, environment, risk_level, blocking_items=None):
+        self.version = version
+        self.environment = environment
+        self.risk_level = risk_level
+        self.blocking_items = blocking_items or []
+        items_str = "\n  - ".join(self.blocking_items) if self.blocking_items else "none"
+        message = (
+            f"Release of version '{version}' to '{environment}' is blocked by risk assessment. "
+            f"Risk level: {risk_level}. Blocking items:\n  - {items_str}\n"
+            f"Use 'pipeline risk scan' to view details or 'pipeline risk approve' for high-risk approval."
+        )
+        super().__init__(message, code="RISK_BLOCKED_RELEASE")
+
+
+class RiskApprovalRequiredError(PipelineError):
+    """High risk requires release-manager approval"""
+    def __init__(self, version, environment, risk_level):
+        self.version = version
+        self.environment = environment
+        self.risk_level = risk_level
+        message = (
+            f"Version '{version}' has {risk_level} risk level for environment '{environment}'. "
+            f"Release-manager approval is required. Use 'pipeline risk approve'."
+        )
+        super().__init__(message, code="RISK_APPROVAL_REQUIRED")
+
+
+class RiskAlreadyApprovedError(PipelineError):
+    """Risk assessment already approved error"""
+    def __init__(self, version, environment):
+        self.version = version
+        self.environment = environment
+        message = f"Risk assessment for version '{version}' in environment '{environment}' is already approved"
+        super().__init__(message, code="RISK_ALREADY_APPROVED")
+
+
+class RiskAlreadyRevokedError(PipelineError):
+    """Risk assessment already revoked error"""
+    def __init__(self, version, environment):
+        self.version = version
+        self.environment = environment
+        message = f"Risk assessment for version '{version}' in environment '{environment}' is already revoked"
+        super().__init__(message, code="RISK_ALREADY_REVOKED")
+
+
+class RiskNotApprovedError(PipelineError):
+    """Risk assessment is not approved, cannot revoke"""
+    def __init__(self, version, environment):
+        self.version = version
+        self.environment = environment
+        message = f"Risk assessment for version '{version}' in environment '{environment}' is not approved, cannot revoke"
+        super().__init__(message, code="RISK_NOT_APPROVED")
+
+
+class RiskVerificationFailedError(PipelineError):
+    """Risk assessment verification failed error"""
+    def __init__(self, issues):
+        self.issues = issues
+        issues_str = "\n  - ".join(issues)
+        message = f"Risk assessment verification failed:\n  - {issues_str}"
+        super().__init__(message, code="RISK_VERIFICATION_FAILED")
+
+
+class RiskImportConflictError(PipelineError):
+    """Risk assessment import conflict error"""
+    def __init__(self, version, environment):
+        self.version = version
+        self.environment = environment
+        message = f"Risk assessment for version '{version}' in environment '{environment}' already exists. Use --force to overwrite."
+        super().__init__(message, code="RISK_IMPORT_CONFLICT")
+
+
+class InvalidRiskFormatError(PipelineError):
+    """Invalid risk assessment format during import"""
+    def __init__(self, reason):
+        self.reason = reason
+        message = f"Invalid risk assessment format: {reason}"
+        super().__init__(message, code="INVALID_RISK_FORMAT")
+
+
+class RiskSummaryMismatchError(PipelineError):
+    """Risk assessment summary hash mismatch during import"""
+    def __init__(self, expected_hash, actual_hash):
+        self.expected_hash = expected_hash
+        self.actual_hash = actual_hash
+        message = (
+            f"Risk assessment integrity check failed. "
+            f"Expected hash: {expected_hash[:12]}..., Actual: {actual_hash[:12]}..."
+        )
+        super().__init__(message, code="RISK_SUMMARY_MISMATCH")
+
+
+class RiskHashMismatchError(PipelineError):
+    """Risk assessment hash mismatch error"""
+    def __init__(self, expected_hash, actual_hash, hash_type="summary"):
+        self.expected_hash = expected_hash
+        self.actual_hash = actual_hash
+        self.hash_type = hash_type
+        message = (
+            f"Risk assessment {hash_type} hash mismatch. "
+            f"Expected: {expected_hash[:12]}..., Actual: {actual_hash[:12]}..."
+        )
+        super().__init__(message, code="RISK_HASH_MISMATCH")

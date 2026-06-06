@@ -1,0 +1,59 @@
+{
+  "app_name": "myapp",
+  "version": "4.0.0",
+  "features": {
+    "auth": true,
+    "payments": true,
+    "database_migration": true,
+    "notifications": true
+  },
+  "database": {
+    "host": "db.example.com",
+    "port": 5432,
+    "name": "myapp_prod",
+    "pool_size": 20,
+    "timeout": 30
+  },
+  "api_endpoints": [
+    {
+      "path": "/api/v1/users",
+      "method": "GET",
+      "rate_limit": 200
+    },
+    {
+      "path": "/api/v1/orders",
+      "method": "POST",
+      "rate_limit": 100
+    },
+    {
+      "path": "/api/v1/payments",
+      "method": "POST",
+      "rate_limit": 50
+    },
+    {
+      "path": "/api/v1/migrate",
+      "method": "POST",
+      "rate_limit": 10
+    },
+    {
+      "path": "/api/v1/auth",
+      "method": "POST",
+      "rate_limit": 100
+    },
+    {
+      "path": "/api/v1/notifications",
+      "method": "POST",
+      "rate_limit": 200
+    },
+    {
+      "path": "/api/v1/analytics",
+      "method": "GET",
+      "rate_limit": 300
+    }
+  ],
+  "metadata": {
+    "description": "High risk configuration with auth, payments, and database migration",
+    "team": "platform",
+    "release_date": "2026-06-15"
+  }
+}

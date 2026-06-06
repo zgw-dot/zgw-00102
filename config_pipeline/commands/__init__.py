@@ -12,6 +12,7 @@ from . import batch_cmd
 from . import window_cmd
 from . import package_cmd
 from . import archive_cmd
+from . import risk_cmd
 
 __all__ = [
     "init_cmd",
@@ -28,4 +29,5 @@ __all__ = [
     "window_cmd",
     "package_cmd",
     "archive_cmd",
+    "risk_cmd",
 ]

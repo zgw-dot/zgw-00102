@@ -18,6 +18,7 @@ from .commands.batch_cmd import batch
 from .commands.package_cmd import package
 from .commands.window_cmd import window
 from .commands.archive_cmd import archive
+from .commands.risk_cmd import risk
 from .utils import PipelineNotInitializedError
 
 
@@ -49,6 +50,7 @@ cli.add_command(batch, name="batch")
 cli.add_command(package, name="package")
 cli.add_command(window, name="window")
 cli.add_command(archive, name="archive")
+cli.add_command(risk, name="risk")
 
 
 def main():

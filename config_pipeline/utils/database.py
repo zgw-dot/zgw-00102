@@ -26,6 +26,18 @@ from .errors import (
     InvalidArchiveFormatError,
     PackageNotFoundError,
     PackageVersionNotFoundError,
+    RiskAssessmentNotFoundError,
+    RiskAssessmentAlreadyExistsError,
+    RiskBlockedReleaseError,
+    RiskApprovalRequiredError,
+    RiskAlreadyApprovedError,
+    RiskAlreadyRevokedError,
+    RiskNotApprovedError,
+    RiskVerificationFailedError,
+    RiskImportConflictError,
+    InvalidRiskFormatError,
+    RiskSummaryMismatchError,
+    RiskHashMismatchError,
 )
 
 
@@ -246,6 +258,33 @@ def init_db():
         revoke_reason TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    ''')
+
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS risk_assessments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        version TEXT NOT NULL,
+        environment TEXT NOT NULL,
+        risk_level TEXT NOT NULL,
+        risk_score INTEGER NOT NULL,
+        blocking_items TEXT NOT NULL,
+        warning_items TEXT NOT NULL,
+        info_items TEXT NOT NULL,
+        config_hash TEXT NOT NULL,
+        approval_status TEXT NOT NULL DEFAULT 'pending',
+        approved_by TEXT,
+        approved_at TIMESTAMP,
+        approval_notes TEXT,
+        revoked_by TEXT,
+        revoked_at TIMESTAMP,
+        revoke_reason TEXT,
+        scan_details TEXT NOT NULL,
+        summary_hash TEXT NOT NULL,
+        created_by TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(version, environment)
     )
     ''')
 
@@ -2579,3 +2618,739 @@ def import_archive(archive_data, cli_role=None, force=False):
     )
 
     return get_archive(archive_name)
+
+
+def _row_to_risk_assessment_dict(row):
+    """Convert a risk assessment row to a dict with JSON fields parsed."""
+    return {
+        "id": row["id"],
+        "version": row["version"],
+        "environment": row["environment"],
+        "risk_level": row["risk_level"],
+        "risk_score": row["risk_score"],
+        "blocking_items": json.loads(row["blocking_items"]),
+        "warning_items": json.loads(row["warning_items"]),
+        "info_items": json.loads(row["info_items"]),
+        "config_hash": row["config_hash"],
+        "approval_status": row["approval_status"],
+        "approved_by": row["approved_by"],
+        "approved_at": row["approved_at"],
+        "approval_notes": row["approval_notes"],
+        "revoked_by": row["revoked_by"],
+        "revoked_at": row["revoked_at"],
+        "revoke_reason": row["revoke_reason"],
+        "scan_details": json.loads(row["scan_details"]),
+        "summary_hash": row["summary_hash"],
+        "created_by": row["created_by"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def risk_assessment_exists(version, environment):
+    """Check if a risk assessment exists for a version in an environment."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT 1 FROM risk_assessments WHERE version = ? AND environment = ?",
+            (version, environment)
+        )
+        return cursor.fetchone() is not None
+
+
+def get_risk_assessment(version=None, environment=None, risk_id=None):
+    """Get a risk assessment by version+environment or by ID."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        if risk_id is not None:
+            cursor.execute(
+                "SELECT * FROM risk_assessments WHERE id = ?",
+                (risk_id,)
+            )
+        elif version is not None and environment is not None:
+            cursor.execute(
+                "SELECT * FROM risk_assessments WHERE version = ? AND environment = ?",
+                (version, environment)
+            )
+        else:
+            raise ValueError("Either risk_id or both version and environment must be provided")
+        row = cursor.fetchone()
+        return _row_to_risk_assessment_dict(row) if row else None
+
+
+def get_all_risk_assessments(environment=None, risk_level=None, approval_status=None, limit=100):
+    """Get all risk assessments, optionally filtered."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        query = "SELECT * FROM risk_assessments WHERE 1=1"
+        params = []
+
+        if environment is not None:
+            query += " AND environment = ?"
+            params.append(environment)
+        if risk_level is not None:
+            query += " AND risk_level = ?"
+            params.append(risk_level)
+        if approval_status is not None:
+            query += " AND approval_status = ?"
+            params.append(approval_status)
+
+        query += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+        return [_row_to_risk_assessment_dict(row) for row in rows]
+
+
+def _compute_risk_hash(version, environment, risk_level, risk_score, blocking_items,
+                       warning_items, info_items, config_hash, scan_details):
+    """Compute the summary hash for a risk assessment."""
+    hash_input = json.dumps({
+        "version": version,
+        "environment": environment,
+        "risk_level": risk_level,
+        "risk_score": risk_score,
+        "blocking_items": sorted(blocking_items),
+        "warning_items": sorted(warning_items),
+        "info_items": sorted(info_items),
+        "config_hash": config_hash,
+        "scan_details": scan_details,
+    }, sort_keys=True)
+    return hashlib.sha256(hash_input.encode("utf-8")).hexdigest()
+
+
+def compute_risk_hash_from_data(risk_data):
+    """Compute summary hash from risk data itself (for import verification)."""
+    version = risk_data["version"]
+    environment = risk_data["environment"]
+    risk_level = risk_data["risk_level"]
+    risk_score = risk_data["risk_score"]
+    blocking_items = risk_data.get("blocking_items", [])
+    warning_items = risk_data.get("warning_items", [])
+    info_items = risk_data.get("info_items", [])
+    config_hash = risk_data["config_hash"]
+    scan_details = risk_data.get("scan_details", {})
+
+    if isinstance(blocking_items, str):
+        blocking_items = json.loads(blocking_items)
+    if isinstance(warning_items, str):
+        warning_items = json.loads(warning_items)
+    if isinstance(info_items, str):
+        info_items = json.loads(info_items)
+    if isinstance(scan_details, str):
+        scan_details = json.loads(scan_details)
+
+    return _compute_risk_hash(
+        version, environment, risk_level, risk_score,
+        blocking_items, warning_items, info_items, config_hash, scan_details
+    )
+
+
+def scan_risk(version, environment, cli_role=None):
+    """Perform a risk assessment scan for a version in an environment.
+
+    Returns the risk assessment dict.
+    """
+    current_role = get_role(cli_role)
+
+    if environment not in VALID_ENVIRONMENTS:
+        raise EnvironmentError(environment, VALID_ENVIRONMENTS)
+
+    if current_role == "developer" and environment == "prod":
+        check_permission("risk.scan.prod", "release-manager", cli_role)
+
+    if not config_exists(version):
+        raise VersionNotFoundError(version)
+
+    cfg = get_config(version)
+    config_data = json.loads(cfg["config_json"])
+    config_hash = hashlib.sha256(
+        json.dumps(config_data, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+
+    blocking_items = []
+    warning_items = []
+    info_items = []
+    risk_score = 0
+
+    scan_details = {
+        "config_version": version,
+        "environment": environment,
+        "scanned_by": get_current_user(),
+        "scanned_at": get_current_time(),
+        "checks": [],
+    }
+
+    approval = get_approval(version, environment)
+    approval_status = approval["status"] if approval else "none"
+    scan_details["checks"].append({
+        "name": "approval",
+        "status": approval_status,
+        "details": f"Approval status: {approval_status}"
+    })
+
+    if environment == "prod":
+        if not has_successful_release(version, "staging"):
+            blocking_items.append(
+                f"Version '{version}' has not been successfully released to staging"
+            )
+            risk_score += 40
+        scan_details["checks"].append({
+            "name": "staging_verification",
+            "passed": has_successful_release(version, "staging"),
+            "details": "Version must be released to staging before prod"
+        })
+
+        if approval_status != "approved":
+            blocking_items.append(
+                f"Version '{version}' is not approved for production"
+            )
+            risk_score += 30
+        scan_details["checks"].append({
+            "name": "approval_check",
+            "passed": approval_status == "approved",
+            "details": "Prod releases require approval"
+        })
+
+        pkg_name = is_version_in_signed_package(version, environment)
+        if not pkg_name:
+            blocking_items.append(
+                f"Version '{version}' is not in a signed change package for prod"
+            )
+            risk_score += 30
+        scan_details["checks"].append({
+            "name": "package_signoff",
+            "passed": pkg_name is not None,
+            "details": "Prod releases require signed package",
+            "package": pkg_name
+        })
+    else:
+        scan_details["checks"].append({
+            "name": "non_prod_environment",
+            "passed": True,
+            "details": f"Non-production environment ({environment}) has fewer restrictions"
+        })
+
+    active_window = get_active_release_window(environment)
+    if active_window:
+        warning_items.append(
+            f"Environment '{environment}' is in a closed release window: {active_window['reason']}"
+        )
+        risk_score += 15
+    scan_details["checks"].append({
+        "name": "release_window",
+        "passed": active_window is None,
+        "details": "Check if release window is open",
+        "window": active_window["reason"] if active_window else None
+    })
+
+    if is_environment_locked(environment):
+        lock_info = get_environment_lock(environment)
+        blocking_items.append(
+            f"Environment '{environment}' is locked: {lock_info.get('lock_reason', 'No reason')}"
+        )
+        risk_score += 50
+    scan_details["checks"].append({
+        "name": "environment_lock",
+        "passed": not is_environment_locked(environment),
+        "details": "Check if environment is locked",
+        "locked": is_environment_locked(environment)
+    })
+
+    current_env_version = get_current_version(environment)
+    if current_env_version == version:
+        warning_items.append(
+            f"Version '{version}' is already the current version in '{environment}'"
+        )
+        risk_score += 5
+    scan_details["checks"].append({
+        "name": "version_duplicate",
+        "passed": current_env_version != version,
+        "details": "Check if version is already deployed",
+        "current_version": current_env_version
+    })
+
+    features = config_data.get("features", {})
+    high_risk_features = [k for k, v in features.items() if v and k in ["auth", "payments", "database_migration"]]
+    if high_risk_features:
+        warning_items.append(
+            f"Configuration includes high-risk feature changes: {', '.join(high_risk_features)}"
+        )
+        risk_score += len(high_risk_features) * 20
+    scan_details["checks"].append({
+        "name": "high_risk_features",
+        "features": high_risk_features,
+        "risk_contribution": len(high_risk_features) * 20,
+        "details": "Check for high-risk feature flags"
+    })
+
+    api_endpoints = config_data.get("api_endpoints", [])
+    critical_endpoints = [ep for ep in api_endpoints if "/api/" in str(ep.get("path", ""))]
+    if len(critical_endpoints) > 5:
+        info_items.append(
+            f"Configuration includes {len(critical_endpoints)} API endpoint definitions"
+        )
+        risk_score += 2
+    scan_details["checks"].append({
+        "name": "api_endpoints_count",
+        "count": len(critical_endpoints),
+        "details": "Count of API endpoints in config"
+    })
+
+    if len(blocking_items) > 0:
+        risk_level = "critical"
+    elif risk_score >= 50:
+        risk_level = "high"
+    elif risk_score >= 25:
+        risk_level = "medium"
+    elif risk_score >= 10:
+        risk_level = "low"
+    else:
+        risk_level = "none"
+
+    summary_hash = _compute_risk_hash(
+        version, environment, risk_level, risk_score,
+        blocking_items, warning_items, info_items, config_hash, scan_details
+    )
+
+    approval_status_final = "pending"
+    if risk_level in ["high", "critical"]:
+        approval_status_final = "requires_approval"
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT OR REPLACE INTO risk_assessments
+            (version, environment, risk_level, risk_score, blocking_items, warning_items,
+             info_items, config_hash, approval_status, scan_details, summary_hash, created_by)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            version, environment, risk_level, risk_score,
+            json.dumps(blocking_items),
+            json.dumps(warning_items),
+            json.dumps(info_items),
+            config_hash,
+            approval_status_final,
+            json.dumps(scan_details),
+            summary_hash,
+            get_current_user(),
+        ))
+
+    log_audit(
+        "risk.scan",
+        "success",
+        environment=environment,
+        version=version,
+        details={
+            "risk_level": risk_level,
+            "risk_score": risk_score,
+            "blocking_count": len(blocking_items),
+            "warning_count": len(warning_items),
+            "summary_hash": summary_hash,
+            "role": current_role,
+        }
+    )
+
+    return get_risk_assessment(version=version, environment=environment)
+
+
+def approve_risk_assessment(version, environment, cli_role=None, notes=None):
+    """Approve a high/critical risk assessment (release-manager only)."""
+    check_permission("risk.approve", "release-manager", cli_role)
+    current_role = get_role(cli_role)
+
+    risk = get_risk_assessment(version=version, environment=environment)
+    if not risk:
+        raise RiskAssessmentNotFoundError(version=version, environment=environment)
+
+    if risk["approval_status"] == "approved":
+        raise RiskAlreadyApprovedError(version, environment)
+
+    if risk["approval_status"] == "revoked":
+        raise RiskAlreadyRevokedError(version, environment)
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            UPDATE risk_assessments
+            SET approval_status = 'approved',
+                approved_by = ?,
+                approved_at = CURRENT_TIMESTAMP,
+                approval_notes = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE version = ? AND environment = ? AND approval_status != 'approved'
+        ''', (get_current_user(), notes, version, environment))
+        if cursor.rowcount == 0:
+            raise RiskAlreadyApprovedError(version, environment)
+
+    log_audit(
+        "risk.approve",
+        "success",
+        environment=environment,
+        version=version,
+        details={
+            "risk_level": risk["risk_level"],
+            "approved_by": get_current_user(),
+            "notes": notes,
+            "role": current_role,
+        }
+    )
+
+    return get_risk_assessment(version=version, environment=environment)
+
+
+def revoke_risk_assessment(version, environment, cli_role=None, reason=None):
+    """Revoke an approved risk assessment (release-manager only)."""
+    check_permission("risk.revoke", "release-manager", cli_role)
+    current_role = get_role(cli_role)
+
+    risk = get_risk_assessment(version=version, environment=environment)
+    if not risk:
+        raise RiskAssessmentNotFoundError(version=version, environment=environment)
+
+    if risk["approval_status"] != "approved":
+        raise RiskNotApprovedError(version, environment)
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            UPDATE risk_assessments
+            SET approval_status = 'revoked',
+                revoked_by = ?,
+                revoked_at = CURRENT_TIMESTAMP,
+                revoke_reason = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE version = ? AND environment = ? AND approval_status = 'approved'
+        ''', (get_current_user(), reason, version, environment))
+        if cursor.rowcount == 0:
+            raise RiskNotApprovedError(version, environment)
+
+    log_audit(
+        "risk.revoke",
+        "success",
+        environment=environment,
+        version=version,
+        details={
+            "risk_level": risk["risk_level"],
+            "revoked_by": get_current_user(),
+            "reason": reason,
+            "role": current_role,
+        }
+    )
+
+    return get_risk_assessment(version=version, environment=environment)
+
+
+def verify_risk_assessment(version=None, environment=None, risk_id=None):
+    """Verify a risk assessment's integrity.
+
+    Checks:
+    1. Risk assessment exists
+    2. Config version still exists and content hasn't changed
+    3. Summary hash matches
+    4. Approval status is valid (not revoked if trying to release)
+
+    Returns (is_valid, issues_list)
+    """
+    risk = get_risk_assessment(version=version, environment=environment, risk_id=risk_id)
+    if not risk:
+        if risk_id:
+            raise RiskAssessmentNotFoundError(risk_id=risk_id)
+        else:
+            raise RiskAssessmentNotFoundError(version=version, environment=environment)
+
+    issues = []
+
+    if risk["approval_status"] == "revoked":
+        issues.append(
+            f"Risk assessment has been revoked by {risk['revoked_by']} at {risk['revoked_at']}"
+        )
+        if risk.get("revoke_reason"):
+            issues.append(f"Revoke reason: {risk['revoke_reason']}")
+
+    version = risk["version"]
+    expected_hash = risk["config_hash"]
+
+    if not config_exists(version):
+        issues.append(f"Version '{version}' no longer exists in configs")
+    else:
+        cfg = get_config(version)
+        config_data = json.loads(cfg["config_json"])
+        actual_hash = hashlib.sha256(
+            json.dumps(config_data, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+
+        if actual_hash != expected_hash:
+            issues.append(
+                f"Version '{version}' content has changed. "
+                f"Expected hash: {expected_hash[:12]}..., Actual: {actual_hash[:12]}..."
+            )
+
+    try:
+        actual_summary_hash = compute_risk_hash_from_data(risk)
+        if actual_summary_hash != risk["summary_hash"]:
+            issues.append(
+                f"Risk assessment summary hash mismatch. "
+                f"Expected: {risk['summary_hash'][:12]}..., Actual: {actual_summary_hash[:12]}..."
+            )
+    except Exception as e:
+        issues.append(f"Error computing summary hash: {e}")
+
+    return len(issues) == 0, issues
+
+
+def check_risk_for_release(version, environment, cli_role=None):
+    """Check if a release can proceed based on risk assessment.
+
+    Returns (can_proceed, risk_assessment_or_None, error_or_None)
+
+    Raises appropriate exceptions if release is blocked.
+    """
+    risk = get_risk_assessment(version=version, environment=environment)
+
+    if risk is None:
+        risk = scan_risk(version, environment, cli_role=cli_role)
+
+    is_valid, issues = verify_risk_assessment(version=version, environment=environment)
+    if not is_valid:
+        log_error(
+            "risk.release_check",
+            "RISK_VERIFY_FAILED",
+            f"Risk assessment verification failed for {version} in {environment}",
+            environment=environment,
+            version=version,
+            details={"issues": issues}
+        )
+        raise RiskVerificationFailedError(issues)
+
+    if len(risk["blocking_items"]) > 0:
+        log_error(
+            "risk.release_check",
+            "RISK_BLOCKED_RELEASE",
+            f"Release blocked by {len(risk['blocking_items'])} blocking items",
+            environment=environment,
+            version=version,
+            details={"blocking_items": risk["blocking_items"]}
+        )
+        raise RiskBlockedReleaseError(
+            version, environment, risk["risk_level"], risk["blocking_items"]
+        )
+
+    if risk["risk_level"] in ["high", "critical"]:
+        if risk["approval_status"] != "approved":
+            log_error(
+                "risk.release_check",
+                "RISK_APPROVAL_REQUIRED",
+                f"{risk['risk_level']} risk requires release-manager approval",
+                environment=environment,
+                version=version,
+                details={"risk_level": risk["risk_level"]}
+            )
+            raise RiskApprovalRequiredError(version, environment, risk["risk_level"])
+
+    return True, risk, None
+
+
+def export_risk_assessment(version=None, environment=None, risk_id=None):
+    """Export a risk assessment to a dict for JSON serialization."""
+    risk = get_risk_assessment(version=version, environment=environment, risk_id=risk_id)
+    if not risk:
+        if risk_id:
+            raise RiskAssessmentNotFoundError(risk_id=risk_id)
+        else:
+            raise RiskAssessmentNotFoundError(version=version, environment=environment)
+
+    return {
+        "risk_format_version": "1.0",
+        "version": risk["version"],
+        "environment": risk["environment"],
+        "risk_level": risk["risk_level"],
+        "risk_score": risk["risk_score"],
+        "blocking_items": risk["blocking_items"],
+        "warning_items": risk["warning_items"],
+        "info_items": risk["info_items"],
+        "config_hash": risk["config_hash"],
+        "approval_status": risk["approval_status"],
+        "approved_by": risk["approved_by"],
+        "approved_at": risk["approved_at"],
+        "approval_notes": risk["approval_notes"],
+        "revoked_by": risk["revoked_by"],
+        "revoked_at": risk["revoked_at"],
+        "revoke_reason": risk["revoke_reason"],
+        "scan_details": risk["scan_details"],
+        "summary_hash": risk["summary_hash"],
+        "created_by": risk["created_by"],
+        "created_at": risk["created_at"],
+        "_meta": {
+            "exported_at": get_current_time(),
+            "exported_by": get_current_user(),
+        }
+    }
+
+
+def import_risk_assessment(risk_data, cli_role=None, force=False):
+    """Import a risk assessment from exported data.
+
+    Args:
+        risk_data: Dict from export_risk_assessment
+        cli_role: Optional role override
+        force: If True, overwrite existing assessment
+
+    Returns:
+        Imported risk assessment dict
+    """
+    required_fields = [
+        "version", "environment", "risk_level", "risk_score",
+        "blocking_items", "warning_items", "info_items",
+        "config_hash", "summary_hash",
+    ]
+    for field in required_fields:
+        if field not in risk_data:
+            raise InvalidRiskFormatError(f"Missing required field: {field}")
+
+    version = risk_data["version"]
+    environment = risk_data["environment"]
+    expected_hash = risk_data["summary_hash"]
+
+    if environment not in VALID_ENVIRONMENTS:
+        raise EnvironmentError(environment, VALID_ENVIRONMENTS)
+
+    current_role = get_role(cli_role)
+
+    if current_role == "developer" and environment == "prod":
+        check_permission("risk.import.prod", "release-manager", cli_role)
+
+    existing = get_risk_assessment(version=version, environment=environment)
+    if existing:
+        if force:
+            if environment == "prod":
+                check_permission("risk.import.force.prod", "release-manager", cli_role)
+        else:
+            raise RiskImportConflictError(version, environment)
+
+    computed_hash = compute_risk_hash_from_data(risk_data)
+    if computed_hash != expected_hash:
+        log_error(
+            "risk.import",
+            "RISK_SUMMARY_MISMATCH",
+            f"Risk assessment integrity check failed for {version} in {environment}",
+            environment=environment,
+            version=version,
+            details={
+                "expected_hash": expected_hash,
+                "actual_hash": computed_hash,
+            }
+        )
+        log_audit(
+            "risk.import",
+            "failed",
+            environment=environment,
+            version=version,
+            error_reason="Risk assessment summary hash mismatch during import",
+            details={
+                "expected_hash": expected_hash,
+                "actual_hash": computed_hash,
+                "role": current_role,
+            }
+        )
+        raise RiskSummaryMismatchError(expected_hash, computed_hash)
+
+    blocking_items = risk_data["blocking_items"]
+    warning_items = risk_data["warning_items"]
+    info_items = risk_data["info_items"]
+    risk_level = risk_data["risk_level"]
+    risk_score = risk_data["risk_score"]
+    config_hash = risk_data["config_hash"]
+    approval_status = risk_data.get("approval_status", "pending")
+    scan_details = risk_data.get("scan_details", {})
+
+    if isinstance(blocking_items, str):
+        blocking_items = json.loads(blocking_items)
+    if isinstance(warning_items, str):
+        warning_items = json.loads(warning_items)
+    if isinstance(info_items, str):
+        info_items = json.loads(info_items)
+    if isinstance(scan_details, str):
+        scan_details = json.loads(scan_details)
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        if existing and force:
+            cursor.execute('''
+                UPDATE risk_assessments
+                SET risk_level = ?,
+                    risk_score = ?,
+                    blocking_items = ?,
+                    warning_items = ?,
+                    info_items = ?,
+                    config_hash = ?,
+                    approval_status = ?,
+                    approved_by = ?,
+                    approved_at = ?,
+                    approval_notes = ?,
+                    revoked_by = ?,
+                    revoked_at = ?,
+                    revoke_reason = ?,
+                    scan_details = ?,
+                    summary_hash = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE version = ? AND environment = ?
+            ''', (
+                risk_level, risk_score,
+                json.dumps(blocking_items),
+                json.dumps(warning_items),
+                json.dumps(info_items),
+                config_hash,
+                approval_status,
+                risk_data.get("approved_by"),
+                risk_data.get("approved_at"),
+                risk_data.get("approval_notes"),
+                risk_data.get("revoked_by"),
+                risk_data.get("revoked_at"),
+                risk_data.get("revoke_reason"),
+                json.dumps(scan_details),
+                expected_hash,
+                version, environment,
+            ))
+        else:
+            cursor.execute('''
+                INSERT INTO risk_assessments
+                (version, environment, risk_level, risk_score, blocking_items, warning_items,
+                 info_items, config_hash, approval_status, approved_by, approved_at,
+                 approval_notes, revoked_by, revoked_at, revoke_reason, scan_details,
+                 summary_hash, created_by)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                version, environment, risk_level, risk_score,
+                json.dumps(blocking_items),
+                json.dumps(warning_items),
+                json.dumps(info_items),
+                config_hash,
+                approval_status,
+                risk_data.get("approved_by"),
+                risk_data.get("approved_at"),
+                risk_data.get("approval_notes"),
+                risk_data.get("revoked_by"),
+                risk_data.get("revoked_at"),
+                risk_data.get("revoke_reason"),
+                json.dumps(scan_details),
+                expected_hash,
+                risk_data.get("created_by", get_current_user()),
+            ))
+
+    log_audit(
+        "risk.import",
+        "success",
+        environment=environment,
+        version=version,
+        details={
+            "risk_level": risk_level,
+            "summary_hash": expected_hash,
+            "approval_status": approval_status,
+            "role": current_role,
+            "force": force,
+        }
+    )
+
+    return get_risk_assessment(version=version, environment=environment)

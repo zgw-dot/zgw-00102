@@ -21,6 +21,7 @@ from ..utils import (
     check_preview_drift,
     delete_preview,
     check_release_window,
+    check_risk_for_release,
     EnvironmentError,
     VersionNotFoundError,
     DuplicateVersionError,
@@ -36,6 +37,10 @@ from ..utils import (
     OverridePermissionDeniedError,
     InvalidWindowTimeError,
     PackageNotSignedError,
+    RiskBlockedReleaseError,
+    RiskApprovalRequiredError,
+    RiskVerificationFailedError,
+    RiskHashMismatchError,
     VALID_ENVIRONMENTS,
     compute_diff,
     has_changes,
@@ -90,6 +95,11 @@ def pre_apply_checks(version, environment, cli_role=None, override_window=False,
     is_valid, pkg_name, error_msg = check_package_signoff(version, environment)
     if not is_valid:
         raise PackageNotSignedError(pkg_name or "unknown", version, environment)
+
+    try:
+        check_risk_for_release(version, environment, cli_role=cli_role)
+    except (RiskBlockedReleaseError, RiskApprovalRequiredError, RiskVerificationFailedError) as e:
+        raise e
 
     return can_proceed, window_info, override_info
 
@@ -226,7 +236,7 @@ def apply(version, environment, role, yes, from_preview, ack_drift, override_win
             override_window=override_window,
             override_reason=override_reason
         )
-    except (EnvironmentError, VersionNotFoundError, DuplicateVersionError, StagingRequiredError, EnvironmentLockedError, ApprovalRequiredError, PermissionDeniedError, ReleaseWindowError, OverridePermissionDeniedError, InvalidWindowTimeError, PackageNotSignedError) as e:
+    except (EnvironmentError, VersionNotFoundError, DuplicateVersionError, StagingRequiredError, EnvironmentLockedError, ApprovalRequiredError, PermissionDeniedError, ReleaseWindowError, OverridePermissionDeniedError, InvalidWindowTimeError, PackageNotSignedError, RiskBlockedReleaseError, RiskApprovalRequiredError, RiskVerificationFailedError) as e:
         if isinstance(e, ReleaseWindowError) or isinstance(e, OverridePermissionDeniedError):
             pass
         else:
